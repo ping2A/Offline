@@ -1,0 +1,14 @@
+[package]
+name = "offline-mesh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "BLE mesh routing policy: TTL flood, dedupe, duty cycle"
+
+[dependencies]
+offline-packet = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+web-time = { workspace = true }
+
+[dev-dependencies]

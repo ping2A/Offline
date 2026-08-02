@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base href="$FLUTTER_BASE_HREF">
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="IE=edge">
+  <meta name="description" content="Offline — optical QR file transfer and identity in the browser. Mesh chat on Android/iOS.">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="Offline">
+  <meta name="theme-color" content="#1B4D3E">
+  <title>Offline</title>
+  <link rel="manifest" href="manifest.json">
+  <style>
+    html, body {
+      height: 100%;
+      margin: 0;
+      background: #E6EDE8;
+    }
+  </style>
+  <!-- SharedArrayBuffer for flutter_rust_bridge WASM workers (also set via flutter run --web-header). -->
+  <script>
+    (function () {
+      var has = typeof navigator !== 'undefined'
+        && 'bluetooth' in navigator
+        && navigator.bluetooth != null;
+      window.__offlineBle = {
+        hasBluetooth: has,
+        requestDevice: function (options) {
+          if (!navigator.bluetooth) {
+            return Promise.reject(new Error(
+              'navigator.bluetooth missing. Use desktop Chrome/Edge with Web Bluetooth enabled '
+              + '(chrome://flags/#enable-web-bluetooth). UA=' + (navigator.userAgent || '')
+            ));
+          }
+          return navigator.bluetooth.requestDevice(options);
+        },
+        getDevices: function () {
+          if (!navigator.bluetooth || typeof navigator.bluetooth.getDevices !== 'function') {
+            return Promise.resolve([]);
+          }
+          return navigator.bluetooth.getDevices();
+        },
+        diagnose: function () {
+          return {
+            hasBluetooth: has,
+            inOperator: typeof navigator !== 'undefined' && ('bluetooth' in navigator),
+            typeofBluetooth: typeof (navigator && navigator.bluetooth),
+            userAgent: navigator.userAgent || '',
+            secure: window.isSecureContext === true,
+            crossOriginIsolated: window.crossOriginIsolated === true,
+            protocol: location.protocol,
+            host: location.host,
+          };
+        }
+      };
+      console.info('[OfflineBLE] bootstrap', window.__offlineBle.diagnose());
+      if (!has) {
+        console.warn(
+          '[OfflineBLE] navigator.bluetooth is missing. '
+          + 'Web Bluetooth needs desktop Chrome or Edge (not Safari/Firefox/iOS). '
+          + 'Check chrome://flags/#enable-web-bluetooth is Enabled, and that no extension blocks Bluetooth.'
+        );
+      }
+    })();
+    if (!crossOriginIsolated) {
+      console.info('Offline web: for best WASM performance serve with COOP/COEP headers.');
+    }
+  </script>
+</head>
+<body>
+  <script src="flutter_bootstrap.js" async></script>
+</body>
+</html>

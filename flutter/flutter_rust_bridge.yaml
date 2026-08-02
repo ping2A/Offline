@@ -1,0 +1,5 @@
+rust_input: crate::api
+rust_root: ../crates/offline_ffi/
+dart_output: lib/src/rust
+full_dep: true
+default_dart_async: false

@@ -1,0 +1,25 @@
+[package]
+name = "rust_lib_offline"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Flutter FFI bridge for Offline (flutter_rust_bridge)"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+flutter_rust_bridge = "=2.12.0"
+offline-core = { workspace = true }
+offline-noise = { workspace = true }
+offline-fountain = { workspace = true }
+offline-packet = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+
+# Needed so `rand` / dalek work under wasm32-unknown-unknown (Flutter web).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }

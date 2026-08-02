@@ -1,0 +1,18 @@
+[package]
+name = "offline-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Offline app core: mesh chat + optical transfer façade"
+
+[dependencies]
+offline-packet = { workspace = true }
+offline-noise = { workspace = true }
+offline-fountain = { workspace = true }
+offline-mesh = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+hex = { workspace = true }
+web-time = { workspace = true }
+
+[dev-dependencies]

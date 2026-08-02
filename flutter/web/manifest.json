@@ -1,0 +1,11 @@
+{
+  "name": "Offline",
+  "short_name": "Offline",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#E6EDE8",
+  "theme_color": "#1B4D3E",
+  "description": "Offline mesh chat and optical file transfer",
+  "orientation": "portrait-primary",
+  "prefer_related_applications": false
+}

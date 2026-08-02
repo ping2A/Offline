@@ -1,0 +1,11 @@
+[package]
+name = "offline-fountain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Luby transform fountain codes for optical (QR) file transfer"
+
+[dependencies]
+thiserror = { workspace = true }
+
+[dev-dependencies]
