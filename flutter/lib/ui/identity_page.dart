@@ -1,10 +1,14 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:offline/src/rust/api/identity.dart';
 import 'package:offline/ui/app_theme.dart';
 import 'package:offline/ui/binary_qr.dart';
 import 'package:offline/ui/identity_store.dart';
 import 'package:offline/ui/widgets.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// Share URI for Noise static public key (scannable / copy-paste).
 String offlineNoiseShareUri(List<int> noisePublicKey) =>
@@ -13,7 +17,9 @@ String offlineNoiseShareUri(List<int> noisePublicKey) =>
 String _hex(List<int> bytes) =>
     bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 
-class IdentityPage extends StatelessWidget {
+enum _QrMode { offline, bitchat }
+
+class IdentityPage extends StatefulWidget {
   const IdentityPage({
     super.key,
     required this.identity,
@@ -23,6 +29,88 @@ class IdentityPage extends StatelessWidget {
   final StoredIdentity identity;
   final ValueChanged<StoredIdentity> onRegenerated;
 
+  @override
+  State<IdentityPage> createState() => _IdentityPageState();
+}
+
+class _IdentityPageState extends State<IdentityPage> {
+  static const _nickPrefsKey = 'identity.verify_nick';
+
+  _QrMode _mode = _QrMode.bitchat;
+  late final TextEditingController _nick;
+  String? _bitchatUri;
+  String? _bitchatError;
+  Timer? _refresh;
+  Timer? _nickDebounce;
+
+  StoredIdentity get identity => widget.identity;
+
+  @override
+  void initState() {
+    super.initState();
+    final fallback = identity.peerId.length >= 8
+        ? identity.peerId.substring(0, 8)
+        : identity.peerId;
+    _nick = TextEditingController(text: fallback);
+    unawaited(_loadNick());
+    _rebuildBitChatQr();
+    // BitChat rejects verify QRs older than ~5 minutes — refresh early.
+    _refresh = Timer.periodic(const Duration(minutes: 2), (_) {
+      if (_mode == _QrMode.bitchat && mounted) _rebuildBitChatQr();
+    });
+  }
+
+  @override
+  void didUpdateWidget(covariant IdentityPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.identity.peerId != widget.identity.peerId) {
+      _rebuildBitChatQr();
+    }
+  }
+
+  @override
+  void dispose() {
+    _refresh?.cancel();
+    _nickDebounce?.cancel();
+    _nick.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadNick() async {
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getString(_nickPrefsKey)?.trim();
+    if (saved != null && saved.isNotEmpty && mounted) {
+      _nick.text = saved;
+      _rebuildBitChatQr();
+    }
+  }
+
+  Future<void> _saveNick(String nick) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_nickPrefsKey, nick.trim());
+  }
+
+  void _rebuildBitChatQr() {
+    try {
+      final uri = buildBitchatVerifyQr(
+        noiseSecretKey: identity.noiseSecretKey,
+        signingSecretKey: identity.signingSecretKey,
+        nickname: _nick.text.trim().isEmpty
+            ? identity.peerId.substring(0, 8)
+            : _nick.text.trim(),
+      );
+      setState(() {
+        _bitchatUri = uri;
+        _bitchatError = null;
+      });
+    } catch (e) {
+      setState(() {
+        _bitchatUri = null;
+        _bitchatError = '$e';
+      });
+    }
+  }
+
   void _copy(BuildContext context, String label, String value) {
     Clipboard.setData(ClipboardData(text: value));
     ScaffoldMessenger.of(context).showSnackBar(
@@ -30,11 +118,16 @@ class IdentityPage extends StatelessWidget {
     );
   }
 
+  String get _activeUri =>
+      _mode == _QrMode.offline
+          ? offlineNoiseShareUri(identity.noisePublicKey)
+          : (_bitchatUri ?? '');
+
   @override
   Widget build(BuildContext context) {
     final noiseHex = _hex(identity.noisePublicKey);
-    final shareUri = offlineNoiseShareUri(identity.noisePublicKey);
     final wide = MediaQuery.sizeOf(context).width >= 720;
+    final shareUri = _activeUri;
 
     return ListView(
       padding: const EdgeInsets.only(bottom: 28),
@@ -42,7 +135,7 @@ class IdentityPage extends StatelessWidget {
         const OfflinePageHeader(
           title: 'Identity',
           subtitle:
-              'Share your Noise public key so someone can verify you out of band — same key BitChat binds to your peer ID.',
+              'Share a QR BitChat (or Offline) can scan — same Noise key that binds your peer ID.',
         ),
         if (wide)
           Row(
@@ -76,9 +169,11 @@ class IdentityPage extends StatelessWidget {
         ),
         const SizedBox(height: 18),
         OfflineMonoBlock(
-          label: 'Share URI',
-          value: shareUri,
-          onCopy: () => _copy(context, 'Share URI', shareUri),
+          label: _mode == _QrMode.bitchat ? 'BitChat verify URI' : 'Share URI',
+          value: shareUri.isEmpty ? (_bitchatError ?? '…') : shareUri,
+          onCopy: shareUri.isEmpty
+              ? null
+              : () => _copy(context, 'Share URI', shareUri),
         ),
         const SizedBox(height: 28),
         OutlinedButton(
@@ -103,7 +198,7 @@ class IdentityPage extends StatelessWidget {
               ),
             );
             if (ok == true) {
-              onRegenerated(await IdentityStore.regenerate());
+              widget.onRegenerated(await IdentityStore.regenerate());
             }
           },
           child: const Text('Regenerate identity'),
@@ -125,7 +220,7 @@ class IdentityPage extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Text(
-              'NOISE KEY',
+              'VERIFY QR',
               style: GoogleFonts.ibmPlexMono(
                 fontSize: 11,
                 letterSpacing: 1.4,
@@ -133,31 +228,87 @@ class IdentityPage extends StatelessWidget {
                 color: OfflineColors.mist,
               ),
             ),
-            const SizedBox(height: 6),
-            Text(
-              'Scan to share your public key',
-              style: GoogleFonts.sourceSans3(
-                fontSize: 15,
-                height: 1.3,
-                color: OfflineColors.ink,
-              ),
+            const SizedBox(height: 10),
+            SegmentedButton<_QrMode>(
+              segments: const [
+                ButtonSegment(
+                  value: _QrMode.bitchat,
+                  label: Text('BitChat'),
+                  icon: Icon(Icons.verified_outlined, size: 16),
+                ),
+                ButtonSegment(
+                  value: _QrMode.offline,
+                  label: Text('Offline'),
+                  icon: Icon(Icons.key_outlined, size: 16),
+                ),
+              ],
+              selected: {_mode},
+              onSelectionChanged: (s) {
+                setState(() => _mode = s.first);
+                if (_mode == _QrMode.bitchat) _rebuildBitChatQr();
+              },
             ),
+            if (_mode == _QrMode.bitchat) ...[
+              const SizedBox(height: 12),
+              TextField(
+                controller: _nick,
+                maxLength: 32,
+                textInputAction: TextInputAction.done,
+                decoration: const InputDecoration(
+                  labelText: 'Nickname in QR',
+                  counterText: '',
+                  isDense: true,
+                ),
+                onChanged: (_) {
+                  _nickDebounce?.cancel();
+                  _nickDebounce = Timer(const Duration(milliseconds: 450), () {
+                    _rebuildBitChatQr();
+                    unawaited(_saveNick(_nick.text));
+                  });
+                },
+                onSubmitted: (_) {
+                  _nickDebounce?.cancel();
+                  _rebuildBitChatQr();
+                  unawaited(_saveNick(_nick.text));
+                },
+              ),
+            ],
             const SizedBox(height: 14),
             Center(
               child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 280),
+                constraints: const BoxConstraints(maxWidth: 360),
                 child: AspectRatio(
                   aspectRatio: 1,
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(12),
-                    child: TextQrView(data: shareUri),
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: OfflineColors.line),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.all(8),
+                      child: shareUri.isEmpty
+                          ? Center(
+                              child: Text(
+                                _bitchatError ?? 'Building…',
+                                textAlign: TextAlign.center,
+                                style: GoogleFonts.sourceSans3(
+                                  color: OfflineColors.danger,
+                                  fontSize: 13,
+                                ),
+                              ),
+                            )
+                          : TextQrView(data: shareUri),
+                    ),
                   ),
                 ),
               ),
             ),
             const SizedBox(height: 12),
             Text(
-              'Encodes offline:noise:… — your Curve25519 Noise static public key.',
+              _mode == _QrMode.bitchat
+                  ? 'BitChat must already see you on the mesh (Start mesh / Join BitChat), then scan this QR in BitChat’s verifier. Use Enlarge for a reliable scan.'
+                  : 'Encodes offline:noise:… — your Curve25519 Noise static public key.',
               textAlign: TextAlign.center,
               style: GoogleFonts.sourceSans3(
                 fontSize: 13,
@@ -166,10 +317,36 @@ class IdentityPage extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 4),
-            TextButton.icon(
-              onPressed: () => _copy(context, 'Share URI', shareUri),
-              icon: const Icon(Icons.copy_rounded, size: 16),
-              label: const Text('Copy share link'),
+            Wrap(
+              alignment: WrapAlignment.center,
+              spacing: 4,
+              children: [
+                if (shareUri.isNotEmpty)
+                  TextButton.icon(
+                    onPressed: () => showLargeQrDialog(
+                      context,
+                      data: shareUri,
+                      title: _mode == _QrMode.bitchat
+                          ? 'BitChat verify QR'
+                          : 'Offline share QR',
+                    ),
+                    icon: const Icon(Icons.fullscreen_rounded, size: 16),
+                    label: const Text('Enlarge'),
+                  ),
+                if (_mode == _QrMode.bitchat)
+                  TextButton.icon(
+                    onPressed: _rebuildBitChatQr,
+                    icon: const Icon(Icons.refresh_rounded, size: 16),
+                    label: const Text('Refresh'),
+                  ),
+                TextButton.icon(
+                  onPressed: shareUri.isEmpty
+                      ? null
+                      : () => _copy(context, 'Share URI', shareUri),
+                  icon: const Icon(Icons.copy_rounded, size: 16),
+                  label: const Text('Copy share link'),
+                ),
+              ],
             ),
           ],
         ),

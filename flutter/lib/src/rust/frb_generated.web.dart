@@ -344,7 +344,8 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       cst_encode_String(raw.nickname),
       cst_encode_u_64(raw.lastSeenMs),
       cst_encode_String(raw.noiseState),
-      cst_encode_bool(raw.hasNoiseKey)
+      cst_encode_bool(raw.hasNoiseKey),
+      cst_encode_bool(raw.verified)
     ].jsify()!;
   }
 
@@ -667,6 +668,12 @@ class RustLibWire implements BaseWire {
               that, peer_id);
 
   JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
+      wire__crate__api__mesh__MeshSession_start_qr_verification(
+              int that, String peer_id) =>
+          wasmModule.wire__crate__api__mesh__MeshSession_start_qr_verification(
+              that, peer_id);
+
+  JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
       wire__crate__api__optical__OpticalReceiveSession_frames_collected(
               int that) =>
           wasmModule
@@ -704,6 +711,14 @@ class RustLibWire implements BaseWire {
       wire__crate__api__optical__OpticalSendSession_total_len(int that) =>
           wasmModule
               .wire__crate__api__optical__OpticalSendSession_total_len(that);
+
+  JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
+      wire__crate__api__identity__build_bitchat_verify_qr(
+              JSAny noise_secret_key,
+              JSAny signing_secret_key,
+              String nickname) =>
+          wasmModule.wire__crate__api__identity__build_bitchat_verify_qr(
+              noise_secret_key, signing_secret_key, nickname);
 
   JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
       wire__crate__api__identity__generate_identity() =>
@@ -859,6 +874,10 @@ extension type RustLibWasmModule._(JSObject _) implements JSObject {
           int that, String peer_id);
 
   external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
+      wire__crate__api__mesh__MeshSession_start_qr_verification(
+          int that, String peer_id);
+
+  external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
       wire__crate__api__optical__OpticalReceiveSession_frames_collected(
           int that);
 
@@ -880,6 +899,10 @@ extension type RustLibWasmModule._(JSObject _) implements JSObject {
 
   external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
       wire__crate__api__optical__OpticalSendSession_total_len(int that);
+
+  external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
+      wire__crate__api__identity__build_bitchat_verify_qr(
+          JSAny noise_secret_key, JSAny signing_secret_key, String nickname);
 
   external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
       wire__crate__api__identity__generate_identity();

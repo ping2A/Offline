@@ -6,6 +6,8 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
+// These functions are ignored because they are not marked as `pub`: `identity_from_secret_vecs`
+
 IdentityBundle generateIdentity() =>
     RustLib.instance.api.crateApiIdentityGenerateIdentity();
 
@@ -18,6 +20,16 @@ IdentityView identityFromSecrets(
 String peerIdFromNoisePublic({required List<int> noisePublicKey}) =>
     RustLib.instance.api
         .crateApiIdentityPeerIdFromNoisePublic(noisePublicKey: noisePublicKey);
+
+/// Build a BitChat-compatible `bitchat://verify?…` QR payload (signed, ~5 min freshness).
+String buildBitchatVerifyQr(
+        {required List<int> noiseSecretKey,
+        required List<int> signingSecretKey,
+        required String nickname}) =>
+    RustLib.instance.api.crateApiIdentityBuildBitchatVerifyQr(
+        noiseSecretKey: noiseSecretKey,
+        signingSecretKey: signingSecretKey,
+        nickname: nickname);
 
 /// Full identity material for secure storage on the Flutter side.
 class IdentityBundle {

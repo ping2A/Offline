@@ -15,6 +15,7 @@ pub struct MeshPeerInfo {
     pub last_seen_ms: u64,
     pub noise_state: String,
     pub has_noise_key: bool,
+    pub verified: bool,
 }
 
 pub struct MeshOutbound {
@@ -157,6 +158,16 @@ impl MeshSession {
             .map_err(|e| e.to_string())
     }
 
+    /// Start BitChat QR verification challenge toward a mesh peer.
+    #[flutter_rust_bridge::frb(sync)]
+    pub fn start_qr_verification(&self, peer_id: String) -> Result<(), String> {
+        self.inner
+            .lock()
+            .expect("mesh")
+            .start_qr_verification(&peer_id)
+            .map_err(|e| e.to_string())
+    }
+
     #[flutter_rust_bridge::frb(sync)]
     pub fn queue_private_message(&self, peer_id: String, text: String) -> Result<(), String> {
         self.inner
@@ -220,17 +231,16 @@ impl MeshSession {
 
     #[flutter_rust_bridge::frb(sync)]
     pub fn list_peers(&self) -> Vec<MeshPeerInfo> {
-        self.inner
-            .lock()
-            .expect("mesh")
-            .peers()
+        let mesh = self.inner.lock().expect("mesh");
+        mesh.peers()
             .into_iter()
             .map(|p: MeshPeer| MeshPeerInfo {
-                peer_id: p.peer_id,
+                peer_id: p.peer_id.clone(),
                 nickname: p.nickname,
                 last_seen_ms: p.last_seen_ms,
                 noise_state: p.noise_state.as_str().to_string(),
                 has_noise_key: p.noise_public_key.is_some(),
+                verified: mesh.is_verified(&p.peer_id),
             })
             .collect()
     }
@@ -344,6 +354,17 @@ fn map_event(e: MeshEvent) -> MeshUiEvent {
             text: String::new(),
             timestamp_ms: 0,
             detail: message_id,
+            is_private: true,
+            file_name: String::new(),
+            file_bytes: Vec::new(),
+        },
+        MeshEvent::PeerVerified { peer_id, nickname } => MeshUiEvent {
+            kind: "verified".into(),
+            peer_id,
+            nickname,
+            text: String::new(),
+            timestamp_ms: 0,
+            detail: "verified".into(),
             is_private: true,
             file_name: String::new(),
             file_bytes: Vec::new(),

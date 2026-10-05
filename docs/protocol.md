@@ -9,6 +9,18 @@ Offline speaks the **BitChat BLE mesh wire protocol** for chat and private sessi
 - Peer ID: first 8 bytes of `SHA-256(noise_static_public)`, rendered as 16 lowercase hex characters  
   (see BitChat `NOISE_PEER_ID_BINDING`)
 
+### Identity verify QR (BitChat-compatible)
+
+Offline can emit BitChat’s signed verification URL (UTF-8 QR), matching `VerificationService`:
+
+```text
+bitchat://verify?v=1&noise=<hex>&sign=<hex>&nick=<utf8>&ts=<unix_s>&nonce=<b64url>&sig=<hex>
+```
+
+Signature covers length-prefixed UTF-8 fields under context `bitchat-verify-v1` (Noise/sign hex lowercased; optional `npub` empty when omitted). BitChat rejects QR older than ~5 minutes — Offline refreshes every 2 minutes. An `offline:noise:<hex>` QR remains available for Offline-only sharing.
+
+**BitChat scan flow:** BitChat only accepts the QR if your Offline Noise key is already a live mesh peer, then sends a Noise `verifyChallenge` (0x10). Offline answers with `verifyResponse` (0x11) signed under `bitchat-verify-resp-v1`. So: start mesh / Join BitChat first, wait until you appear in BitChat’s peer list, then scan.
+
 ## Packet header
 
 Big-endian multi-byte fields.

@@ -62,6 +62,9 @@ abstract class MeshSession implements RustOpaqueInterface {
   void setNickname({required String nickname});
 
   void startNoiseHandshake({required String peerId});
+
+  /// Start BitChat QR verification challenge toward a mesh peer.
+  void startQrVerification({required String peerId});
 }
 
 class MeshOutbound {
@@ -91,6 +94,7 @@ class MeshPeerInfo {
   final BigInt lastSeenMs;
   final String noiseState;
   final bool hasNoiseKey;
+  final bool verified;
 
   const MeshPeerInfo({
     required this.peerId,
@@ -98,6 +102,7 @@ class MeshPeerInfo {
     required this.lastSeenMs,
     required this.noiseState,
     required this.hasNoiseKey,
+    required this.verified,
   });
 
   @override
@@ -106,7 +111,8 @@ class MeshPeerInfo {
       nickname.hashCode ^
       lastSeenMs.hashCode ^
       noiseState.hashCode ^
-      hasNoiseKey.hashCode;
+      hasNoiseKey.hashCode ^
+      verified.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -117,7 +123,8 @@ class MeshPeerInfo {
           nickname == other.nickname &&
           lastSeenMs == other.lastSeenMs &&
           noiseState == other.noiseState &&
-          hasNoiseKey == other.hasNoiseKey;
+          hasNoiseKey == other.hasNoiseKey &&
+          verified == other.verified;
 }
 
 /// Flattened UI event (avoids freezed enum codegen dependency).

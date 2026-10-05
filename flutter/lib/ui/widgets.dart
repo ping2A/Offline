@@ -282,7 +282,7 @@ class OfflineMonoBlock extends StatelessWidget {
                   IconButton(
                     tooltip: 'Copy',
                     onPressed: onCopy,
-                    icon: const Icon(Icons.copy_rounded, size: 18),
+                    icon: Icon(Icons.copy_rounded, size: 18),
                     color: OfflineColors.moss,
                   ),
               ],

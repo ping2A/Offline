@@ -27,28 +27,32 @@ class _HomePageState extends State<HomePage> {
 
   @override
   Widget build(BuildContext context) {
-    final wide = MediaQuery.sizeOf(context).width >= 900;
-
-    return OfflineBackdrop(
-      child: Scaffold(
-        backgroundColor: Colors.transparent,
-        body: SafeArea(
-          child: Center(
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 1280),
-              child: Padding(
-                padding: EdgeInsets.fromLTRB(
-                  wide ? 10 : 6,
-                  wide ? 6 : 4,
-                  wide ? 10 : 6,
-                  wide ? 6 : 4,
+    return ListenableBuilder(
+      listenable: OfflineThemeController.instance,
+      builder: (context, _) {
+        final wide = MediaQuery.sizeOf(context).width >= 900;
+        return OfflineBackdrop(
+          child: Scaffold(
+            backgroundColor: Colors.transparent,
+            body: SafeArea(
+              child: Center(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 1280),
+                  child: Padding(
+                    padding: EdgeInsets.fromLTRB(
+                      wide ? 10 : 6,
+                      wide ? 6 : 4,
+                      wide ? 10 : 6,
+                      wide ? 6 : 4,
+                    ),
+                    child: wide ? _wideLayout() : _narrowLayout(),
+                  ),
                 ),
-                child: wide ? _wideLayout() : _narrowLayout(),
               ),
             ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 
@@ -58,10 +62,13 @@ class _HomePageState extends State<HomePage> {
       height: size,
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(7),
-        gradient: const LinearGradient(
+        gradient: LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: [OfflineColors.moss, Color(0xFFA67A35)],
+          colors: [
+            OfflineColors.moss,
+            OfflineThemeController.instance.palette.brandEnd,
+          ],
         ),
       ),
       alignment: Alignment.center,
@@ -154,6 +161,8 @@ class _HomePageState extends State<HomePage> {
                 const SizedBox(height: 2),
               ],
               const Spacer(),
+              const OfflineThemeButton(),
+              const SizedBox(height: 8),
               _peerChip(),
             ],
           ),
@@ -195,6 +204,8 @@ class _HomePageState extends State<HomePage> {
               ),
             ),
             const Spacer(),
+            const OfflineThemeButton(),
+            const SizedBox(width: 8),
             _peerChip(),
           ],
         ),

@@ -188,7 +188,7 @@ class BleGattServerManager(
         }
     }
 
-    private val advertiseCallback = object : AdvertiseCallback() {
+    private val advertiseCallback: AdvertiseCallback = object : AdvertiseCallback() {
         override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
             Log.i(tag, "advertising as ${adapter?.name}")
         }
@@ -207,7 +207,7 @@ class BleGattServerManager(
                         .setIncludeDeviceName(false)
                         .addServiceUuid(ParcelUuid(BleUuids.SERVICE))
                         .build()
-                    advertiser?.startAdvertising(settings, data, advertiseCallback)
+                    advertiser?.startAdvertising(settings, data, this)
                 } catch (e: Exception) {
                     Log.e(tag, "lean advertise failed: ${e.message}")
                 }

@@ -73,7 +73,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.12.0';
 
   @override
-  int get rustContentHash => -988853497;
+  int get rustContentHash => -1541052592;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -139,6 +139,9 @@ abstract class RustLibApi extends BaseApi {
   void crateApiMeshMeshSessionStartNoiseHandshake(
       {required MeshSession that, required String peerId});
 
+  void crateApiMeshMeshSessionStartQrVerification(
+      {required MeshSession that, required String peerId});
+
   BigInt crateApiOpticalOpticalReceiveSessionFramesCollected(
       {required OpticalReceiveSession that});
 
@@ -159,6 +162,11 @@ abstract class RustLibApi extends BaseApi {
 
   int crateApiOpticalOpticalSendSessionTotalLen(
       {required OpticalSendSession that});
+
+  String crateApiIdentityBuildBitchatVerifyQr(
+      {required List<int> noiseSecretKey,
+      required List<int> signingSecretKey,
+      required String nickname});
 
   IdentityBundle crateApiIdentityGenerateIdentity();
 
@@ -712,6 +720,34 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  void crateApiMeshMeshSessionStartQrVerification(
+      {required MeshSession that, required String peerId}) {
+    return handler.executeSync(SyncTask(
+      callFfi: () {
+        var arg0 =
+            cst_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerMeshSession(
+                that);
+        var arg1 = cst_encode_String(peerId);
+        return wire.wire__crate__api__mesh__MeshSession_start_qr_verification(
+            arg0, arg1);
+      },
+      codec: DcoCodec(
+        decodeSuccessData: dco_decode_unit,
+        decodeErrorData: dco_decode_String,
+      ),
+      constMeta: kCrateApiMeshMeshSessionStartQrVerificationConstMeta,
+      argValues: [that, peerId],
+      apiImpl: this,
+    ));
+  }
+
+  TaskConstMeta get kCrateApiMeshMeshSessionStartQrVerificationConstMeta =>
+      const TaskConstMeta(
+        debugName: "MeshSession_start_qr_verification",
+        argNames: ["that", "peerId"],
+      );
+
+  @override
   BigInt crateApiOpticalOpticalReceiveSessionFramesCollected(
       {required OpticalReceiveSession that}) {
     return handler.executeSync(SyncTask(
@@ -902,6 +938,35 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(
         debugName: "OpticalSendSession_total_len",
         argNames: ["that"],
+      );
+
+  @override
+  String crateApiIdentityBuildBitchatVerifyQr(
+      {required List<int> noiseSecretKey,
+      required List<int> signingSecretKey,
+      required String nickname}) {
+    return handler.executeSync(SyncTask(
+      callFfi: () {
+        var arg0 = cst_encode_list_prim_u_8_loose(noiseSecretKey);
+        var arg1 = cst_encode_list_prim_u_8_loose(signingSecretKey);
+        var arg2 = cst_encode_String(nickname);
+        return wire.wire__crate__api__identity__build_bitchat_verify_qr(
+            arg0, arg1, arg2);
+      },
+      codec: DcoCodec(
+        decodeSuccessData: dco_decode_String,
+        decodeErrorData: dco_decode_String,
+      ),
+      constMeta: kCrateApiIdentityBuildBitchatVerifyQrConstMeta,
+      argValues: [noiseSecretKey, signingSecretKey, nickname],
+      apiImpl: this,
+    ));
+  }
+
+  TaskConstMeta get kCrateApiIdentityBuildBitchatVerifyQrConstMeta =>
+      const TaskConstMeta(
+        debugName: "build_bitchat_verify_qr",
+        argNames: ["noiseSecretKey", "signingSecretKey", "nickname"],
       );
 
   @override
@@ -1348,14 +1413,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   MeshPeerInfo dco_decode_mesh_peer_info(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 5)
-      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
+    if (arr.length != 6)
+      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
     return MeshPeerInfo(
       peerId: dco_decode_String(arr[0]),
       nickname: dco_decode_String(arr[1]),
       lastSeenMs: dco_decode_u_64(arr[2]),
       noiseState: dco_decode_String(arr[3]),
       hasNoiseKey: dco_decode_bool(arr[4]),
+      verified: dco_decode_bool(arr[5]),
     );
   }
 
@@ -1637,12 +1703,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_lastSeenMs = sse_decode_u_64(deserializer);
     var var_noiseState = sse_decode_String(deserializer);
     var var_hasNoiseKey = sse_decode_bool(deserializer);
+    var var_verified = sse_decode_bool(deserializer);
     return MeshPeerInfo(
         peerId: var_peerId,
         nickname: var_nickname,
         lastSeenMs: var_lastSeenMs,
         noiseState: var_noiseState,
-        hasNoiseKey: var_hasNoiseKey);
+        hasNoiseKey: var_hasNoiseKey,
+        verified: var_verified);
   }
 
   @protected
@@ -2034,6 +2102,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_u_64(self.lastSeenMs, serializer);
     sse_encode_String(self.noiseState, serializer);
     sse_encode_bool(self.hasNoiseKey, serializer);
+    sse_encode_bool(self.verified, serializer);
   }
 
   @protected
@@ -2222,6 +2291,10 @@ class MeshSessionImpl extends RustOpaque implements MeshSession {
 
   void startNoiseHandshake({required String peerId}) => RustLib.instance.api
       .crateApiMeshMeshSessionStartNoiseHandshake(that: this, peerId: peerId);
+
+  /// Start BitChat QR verification challenge toward a mesh peer.
+  void startQrVerification({required String peerId}) => RustLib.instance.api
+      .crateApiMeshMeshSessionStartQrVerification(that: this, peerId: peerId);
 }
 
 @sealed

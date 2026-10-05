@@ -6,7 +6,9 @@ const Color kMeshSelfColor = Color(0xFFFF9F0A);
 
 /// Stable peer color from a seed (peer ID / nickname), matching BitChat's
 /// djb2 → HSV approach (orange reserved for self).
-Color meshPeerColor(String seed, {bool isDark = true}) {
+Color meshPeerColor(String seed, {bool? isDark}) {
+  final dark = isDark ??
+      OfflineThemeController.instance.palette.brightness == Brightness.dark;
   var hash = 5381;
   final bytes = seed.codeUnits;
   for (final b in bytes) {
@@ -20,8 +22,8 @@ Color meshPeerColor(String seed, {bool isDark = true}) {
     hue = (hue + 0.12) % 1.0;
   }
 
-  final sat = isDark ? 0.55 : 0.70;
-  final value = isDark ? 0.82 : 0.42;
+  final sat = dark ? 0.55 : 0.70;
+  final value = dark ? 0.82 : 0.42;
   return HSVColor.fromAHSV(1, hue * 360, sat, value).toColor();
 }
 

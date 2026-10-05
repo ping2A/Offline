@@ -68,6 +68,18 @@ Tabs:
 
 `android/app/build.gradle.kts` must keep `flutter { source = "../.." }` (relative to `android/app/`). A wrong `../` makes Flutter treat `android/` as the Dart package root and crash native-assets builds.
 
+### Mobile (APK / iOS)
+
+```bash
+./scripts/build_mobile.sh              # release APK → flutter/build/app/outputs/flutter-apk/
+./scripts/build_mobile.sh --ios        # unsigned .xcarchive zip (macOS + Xcode)
+./scripts/build_mobile.sh --all        # Android + iOS
+./scripts/build_mobile.sh --debug      # debug APK
+./scripts/build_mobile.sh --out dist   # also copy named artifacts into dist/
+```
+
+Cargokit builds the Rust mesh crate during the Flutter build (Rust toolchain required on PATH).
+
 ### Web
 
 Rust runs as WASM under `flutter/web/pkg/` (generated; not committed).

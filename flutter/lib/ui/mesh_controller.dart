@@ -379,6 +379,23 @@ class MeshControllerService extends ChangeNotifier {
     }
   }
 
+  /// BitChat QR verification challenge toward [peerId] (needs announce keys + Noise).
+  Future<void> startQrVerification(String peerId) async {
+    final session = _session;
+    if (session == null) return;
+    try {
+      _selectedPeerId = peerId;
+      session.startQrVerification(peerId: peerId);
+      _status = 'Verify challenge → ${peerId.substring(0, 8)}…';
+      _pullEvents();
+      await _flushOutbound();
+      notifyListeners();
+    } catch (e) {
+      _status = 'Verify failed: $e';
+      notifyListeners();
+    }
+  }
+
   /// BitChat-style live rename: update local nick and force-announce to peers.
   Future<void> updateNickname(String nickname) async {
     final nick = nickname.trim().isEmpty
@@ -924,6 +941,23 @@ class MeshControllerService extends ChangeNotifier {
             _selectedPeerId = null;
           }
           _refreshPeers();
+          break;
+        case 'verified':
+          _refreshPeers();
+          final name = ev.nickname.isNotEmpty
+              ? ev.nickname
+              : ev.peerId.substring(0, 8);
+          _status = 'Verified $name';
+          _addMessage(
+            ChatLine(
+              fromPeerId: ev.peerId,
+              text: '✓ Verified $name (QR challenge)',
+              timestampMs: DateTime.now().millisecondsSinceEpoch,
+              isLocal: true,
+              isPrivate: true,
+              withPeerId: ev.peerId,
+            ),
+          );
           break;
       }
     }

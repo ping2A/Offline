@@ -40,7 +40,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueNom,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -988853497;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1541052592;
 
 // Section: executor
 
@@ -724,6 +724,45 @@ fn wire__crate__api__mesh__MeshSession_start_noise_handshake_impl(
         },
     )
 }
+fn wire__crate__api__mesh__MeshSession_start_qr_verification_impl(
+    that: impl CstDecode<
+        RustOpaqueNom<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<MeshSession>>,
+    >,
+    peer_id: impl CstDecode<String>,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::DcoCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "MeshSession_start_qr_verification",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let api_that = that.cst_decode();
+            let api_peer_id = peer_id.cst_decode();
+            transform_result_dco::<_, _, String>((move || {
+                let mut api_that_guard = None;
+                let decode_indices_ =
+                    flutter_rust_bridge::for_generated::lockable_compute_decode_order(vec![
+                        flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                            &api_that, 0, false,
+                        ),
+                    ]);
+                for i in decode_indices_ {
+                    match i {
+                        0 => api_that_guard = Some(api_that.lockable_decode_sync_ref()),
+                        _ => unreachable!(),
+                    }
+                }
+                let api_that_guard = api_that_guard.unwrap();
+                let output_ok = crate::api::mesh::MeshSession::start_qr_verification(
+                    &*api_that_guard,
+                    api_peer_id,
+                )?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
 fn wire__crate__api__optical__OpticalReceiveSession_frames_collected_impl(
     that: impl CstDecode<
         RustOpaqueNom<
@@ -977,6 +1016,32 @@ fn wire__crate__api__optical__OpticalSendSession_total_len_impl(
                 let api_that_guard = api_that_guard.unwrap();
                 let output_ok = Result::<_, ()>::Ok(
                     crate::api::optical::OpticalSendSession::total_len(&*api_that_guard),
+                )?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
+fn wire__crate__api__identity__build_bitchat_verify_qr_impl(
+    noise_secret_key: impl CstDecode<Vec<u8>>,
+    signing_secret_key: impl CstDecode<Vec<u8>>,
+    nickname: impl CstDecode<String>,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::DcoCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "build_bitchat_verify_qr",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let api_noise_secret_key = noise_secret_key.cst_decode();
+            let api_signing_secret_key = signing_secret_key.cst_decode();
+            let api_nickname = nickname.cst_decode();
+            transform_result_dco::<_, _, String>((move || {
+                let output_ok = crate::api::identity::build_bitchat_verify_qr(
+                    api_noise_secret_key,
+                    api_signing_secret_key,
+                    api_nickname,
                 )?;
                 Ok(output_ok)
             })())
@@ -1401,12 +1466,14 @@ impl SseDecode for crate::api::mesh::MeshPeerInfo {
         let mut var_lastSeenMs = <u64>::sse_decode(deserializer);
         let mut var_noiseState = <String>::sse_decode(deserializer);
         let mut var_hasNoiseKey = <bool>::sse_decode(deserializer);
+        let mut var_verified = <bool>::sse_decode(deserializer);
         return crate::api::mesh::MeshPeerInfo {
             peer_id: var_peerId,
             nickname: var_nickname,
             last_seen_ms: var_lastSeenMs,
             noise_state: var_noiseState,
             has_noise_key: var_hasNoiseKey,
+            verified: var_verified,
         };
     }
 }
@@ -1676,6 +1743,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::mesh::MeshPeerInfo {
             self.last_seen_ms.into_into_dart().into_dart(),
             self.noise_state.into_into_dart().into_dart(),
             self.has_noise_key.into_into_dart().into_dart(),
+            self.verified.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1890,6 +1958,7 @@ impl SseEncode for crate::api::mesh::MeshPeerInfo {
         <u64>::sse_encode(self.last_seen_ms, serializer);
         <String>::sse_encode(self.noise_state, serializer);
         <bool>::sse_encode(self.has_noise_key, serializer);
+        <bool>::sse_encode(self.verified, serializer);
     }
 }
 
@@ -2190,6 +2259,7 @@ mod io {
                 last_seen_ms: self.last_seen_ms.cst_decode(),
                 noise_state: self.noise_state.cst_decode(),
                 has_noise_key: self.has_noise_key.cst_decode(),
+                verified: self.verified.cst_decode(),
             }
         }
     }
@@ -2270,6 +2340,7 @@ mod io {
                 last_seen_ms: Default::default(),
                 noise_state: core::ptr::null_mut(),
                 has_noise_key: Default::default(),
+                verified: Default::default(),
             }
         }
     }
@@ -2455,6 +2526,14 @@ mod io {
     }
 
     #[unsafe(no_mangle)]
+    pub extern "C" fn frbgen_offline_wire__crate__api__mesh__MeshSession_start_qr_verification(
+        that: usize,
+        peer_id: *mut wire_cst_list_prim_u_8_strict,
+    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
+        wire__crate__api__mesh__MeshSession_start_qr_verification_impl(that, peer_id)
+    }
+
+    #[unsafe(no_mangle)]
     pub extern "C" fn frbgen_offline_wire__crate__api__optical__OpticalReceiveSession_frames_collected(
         that: usize,
     ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
@@ -2502,6 +2581,19 @@ mod io {
         that: usize,
     ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
         wire__crate__api__optical__OpticalSendSession_total_len_impl(that)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn frbgen_offline_wire__crate__api__identity__build_bitchat_verify_qr(
+        noise_secret_key: *mut wire_cst_list_prim_u_8_loose,
+        signing_secret_key: *mut wire_cst_list_prim_u_8_loose,
+        nickname: *mut wire_cst_list_prim_u_8_strict,
+    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
+        wire__crate__api__identity__build_bitchat_verify_qr_impl(
+            noise_secret_key,
+            signing_secret_key,
+            nickname,
+        )
     }
 
     #[unsafe(no_mangle)]
@@ -2764,6 +2856,7 @@ mod io {
         last_seen_ms: u64,
         noise_state: *mut wire_cst_list_prim_u_8_strict,
         has_noise_key: bool,
+        verified: bool,
     }
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -2936,8 +3029,8 @@ mod web {
                 .unwrap();
             assert_eq!(
                 self_.length(),
-                5,
-                "Expected 5 elements, got {}",
+                6,
+                "Expected 6 elements, got {}",
                 self_.length()
             );
             crate::api::mesh::MeshPeerInfo {
@@ -2946,6 +3039,7 @@ mod web {
                 last_seen_ms: self_.get(2).cst_decode(),
                 noise_state: self_.get(3).cst_decode(),
                 has_noise_key: self_.get(4).cst_decode(),
+                verified: self_.get(5).cst_decode(),
             }
         }
     }
@@ -3295,6 +3389,14 @@ mod web {
     }
 
     #[wasm_bindgen]
+    pub fn wire__crate__api__mesh__MeshSession_start_qr_verification(
+        that: flutter_rust_bridge::for_generated::wasm_bindgen::JsValue,
+        peer_id: String,
+    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
+        wire__crate__api__mesh__MeshSession_start_qr_verification_impl(that, peer_id)
+    }
+
+    #[wasm_bindgen]
     pub fn wire__crate__api__optical__OpticalReceiveSession_frames_collected(
         that: flutter_rust_bridge::for_generated::wasm_bindgen::JsValue,
     ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
@@ -3342,6 +3444,19 @@ mod web {
         that: flutter_rust_bridge::for_generated::wasm_bindgen::JsValue,
     ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
         wire__crate__api__optical__OpticalSendSession_total_len_impl(that)
+    }
+
+    #[wasm_bindgen]
+    pub fn wire__crate__api__identity__build_bitchat_verify_qr(
+        noise_secret_key: Box<[u8]>,
+        signing_secret_key: Box<[u8]>,
+        nickname: String,
+    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
+        wire__crate__api__identity__build_bitchat_verify_qr_impl(
+            noise_secret_key,
+            signing_secret_key,
+            nickname,
+        )
     }
 
     #[wasm_bindgen]

@@ -6,8 +6,10 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:offline/src/rust/api/identity.dart';
 import 'package:offline/src/rust/api/mesh.dart';
 import 'package:offline/ui/app_theme.dart';
+import 'package:offline/ui/binary_qr.dart';
 import 'package:offline/ui/identity_store.dart';
 import 'package:offline/ui/mesh_audio_blob.dart';
 import 'package:offline/ui/mesh_audio_source.dart';
@@ -340,6 +342,8 @@ class _MeshPageState extends State<MeshPage> with SingleTickerProviderStateMixin
           ],
           const SizedBox(width: 4),
           _segmentToggle(),
+          const SizedBox(width: 4),
+          _idButton(),
           const Spacer(),
           Align(
             alignment: Alignment.centerRight,
@@ -543,6 +547,131 @@ class _MeshPageState extends State<MeshPage> with SingleTickerProviderStateMixin
     );
   }
 
+  Widget _idButton() {
+    return Tooltip(
+      message: 'My verify QR',
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: OfflineColors.raised,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: OfflineColors.line),
+        ),
+        child: Material(
+          color: Colors.transparent,
+          borderRadius: BorderRadius.circular(7),
+          child: InkWell(
+            onTap: _mesh.running ? _showMyVerifyQr : null,
+            borderRadius: BorderRadius.circular(7),
+            child: SizedBox(
+              width: _toolbarH,
+              height: _toolbarH,
+              child: Icon(
+                Icons.qr_code_2_rounded,
+                size: 16,
+                color: _mesh.running ? OfflineColors.ink : OfflineColors.mist,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showMyVerifyQr() async {
+    final nick = _nick.text.trim().isEmpty
+        ? widget.identity.peerId.substring(0, 8)
+        : _nick.text.trim();
+    String uri;
+    try {
+      uri = buildBitchatVerifyQr(
+        noiseSecretKey: widget.identity.noiseSecretKey,
+        signingSecretKey: widget.identity.signingSecretKey,
+        nickname: nick,
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('QR failed: $e')),
+      );
+      return;
+    }
+    if (!mounted) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: OfflineColors.raisedHigh,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'Your BitChat verify QR',
+                  style: GoogleFonts.spaceGrotesk(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 16,
+                    color: OfflineColors.ink,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  'Peer must see you on the mesh first, then scan this in BitChat’s verifier.',
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.sourceSans3(
+                    fontSize: 12,
+                    color: OfflineColors.mist,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Material(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(12),
+                  child: Padding(
+                    padding: const EdgeInsets.all(10),
+                    child: SizedBox(
+                      width: 240,
+                      height: 240,
+                      child: TextQrView(data: uri),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    TextButton.icon(
+                      onPressed: () => showLargeQrDialog(
+                        ctx,
+                        data: uri,
+                        title: 'BitChat verify QR',
+                      ),
+                      icon: const Icon(Icons.fullscreen_rounded, size: 16),
+                      label: const Text('Enlarge'),
+                    ),
+                    TextButton.icon(
+                      onPressed: () {
+                        Clipboard.setData(ClipboardData(text: uri));
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Verify URI copied')),
+                        );
+                      },
+                      icon: const Icon(Icons.copy_rounded, size: 16),
+                      label: const Text('Copy'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   Widget _statusLine(String text) {
     return Text(
       text,
@@ -680,7 +809,7 @@ class _MeshPageState extends State<MeshPage> with SingleTickerProviderStateMixin
             color: OfflineColors.signal.withValues(alpha: 0.5),
           ),
         ),
-        child: const Icon(
+        child: Icon(
           Icons.bluetooth_connected,
           size: 12,
           color: OfflineColors.signal,
@@ -735,7 +864,7 @@ class _MeshPageState extends State<MeshPage> with SingleTickerProviderStateMixin
                   ),
                 ),
               ),
-              if (lock != null)
+                if (lock != null)
                 Positioned(
                   right: -2,
                   bottom: -2,
@@ -754,6 +883,16 @@ class _MeshPageState extends State<MeshPage> with SingleTickerProviderStateMixin
                           ? OfflineColors.signal
                           : OfflineColors.mist,
                     ),
+                  ),
+                ),
+                if (p.verified)
+                Positioned(
+                  left: -2,
+                  top: -2,
+                  child: Icon(
+                    Icons.verified_rounded,
+                    size: 11,
+                    color: OfflineColors.signal,
                   ),
                 ),
             ],
@@ -1080,7 +1219,7 @@ class _MeshPageState extends State<MeshPage> with SingleTickerProviderStateMixin
           padding: const EdgeInsets.fromLTRB(6, 3, 6, 3),
           child: Row(
             children: [
-              const Icon(Icons.person_search_outlined,
+              Icon(Icons.person_search_outlined,
                   size: 12, color: OfflineColors.moss),
               const SizedBox(width: 6),
               Expanded(
@@ -1105,11 +1244,14 @@ class _MeshPageState extends State<MeshPage> with SingleTickerProviderStateMixin
         p.nickname.isEmpty ? p.peerId.substring(0, 8) : p.nickname;
     final ready = p.noiseState == 'ready';
     final handshaking = p.noiseState == 'handshaking';
-    final status = ready
-        ? 'Secure'
-        : handshaking
-            ? 'Handshaking…'
-            : 'Noise on first send';
+    final verified = p.verified;
+    final status = verified
+        ? 'Verified'
+        : ready
+            ? 'Secure'
+            : handshaking
+                ? 'Handshaking…'
+                : 'Noise on first send';
 
     return DecoratedBox(
       decoration: BoxDecoration(
@@ -1123,7 +1265,11 @@ class _MeshPageState extends State<MeshPage> with SingleTickerProviderStateMixin
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
               Icon(
-                ready ? Icons.lock_rounded : Icons.lock_outline_rounded,
+                verified
+                    ? Icons.verified_rounded
+                    : ready
+                        ? Icons.lock_rounded
+                        : Icons.lock_outline_rounded,
                 size: 13,
                 color: OfflineColors.moss,
               ),
@@ -1146,7 +1292,7 @@ class _MeshPageState extends State<MeshPage> with SingleTickerProviderStateMixin
                         style: GoogleFonts.ibmPlexMono(
                           fontSize: 10,
                           height: 1.1,
-                          color: ready
+                          color: verified || ready
                               ? OfflineColors.signal
                               : OfflineColors.mist,
                         ),
@@ -1159,6 +1305,25 @@ class _MeshPageState extends State<MeshPage> with SingleTickerProviderStateMixin
                     fontSize: 12,
                     height: 1.1,
                     forceStrutHeight: true,
+                  ),
+                ),
+              ),
+            if (!verified && p.hasNoiseKey)
+              TextButton(
+                style: TextButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  padding: const EdgeInsets.symmetric(horizontal: 6),
+                  minimumSize: Size.zero,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                onPressed: () =>
+                    unawaited(_mesh.startQrVerification(p.peerId)),
+                child: Text(
+                  'Verify',
+                  style: GoogleFonts.spaceGrotesk(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    color: OfflineColors.moss,
                   ),
                 ),
               ),
@@ -1181,7 +1346,7 @@ class _MeshPageState extends State<MeshPage> with SingleTickerProviderStateMixin
                       ),
                     ),
                 ],
-                child: const Padding(
+                child: Padding(
                   padding: EdgeInsets.symmetric(horizontal: 4),
                   child: Icon(Icons.swap_horiz, size: 18, color: OfflineColors.moss),
                 ),
@@ -1197,7 +1362,7 @@ class _MeshPageState extends State<MeshPage> with SingleTickerProviderStateMixin
                   _mesh.selectPeer(null);
                   setState(() => _sendPrivate = false);
                 },
-                icon: const Icon(Icons.close_rounded, size: 16),
+                icon: Icon(Icons.close_rounded, size: 16),
                 color: OfflineColors.mist,
               ),
             ),
@@ -1420,7 +1585,7 @@ class _MeshPageState extends State<MeshPage> with SingleTickerProviderStateMixin
         decoration: BoxDecoration(
           color: OfflineColors.moss.withValues(alpha: 0.08),
           borderRadius: BorderRadius.circular(8),
-          border: const Border(
+          border: Border(
             left: BorderSide(color: OfflineColors.moss, width: 2),
           ),
         ),
@@ -1537,7 +1702,7 @@ class _MeshPageState extends State<MeshPage> with SingleTickerProviderStateMixin
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
-                    const Icon(Icons.terminal_rounded,
+                    Icon(Icons.terminal_rounded,
                         size: 14, color: OfflineColors.leaf),
                     const SizedBox(width: 6),
                     Text(
@@ -1606,7 +1771,7 @@ class _MeshPageState extends State<MeshPage> with SingleTickerProviderStateMixin
                                       _frameQuery.clear();
                                       setState(() {});
                                     },
-                                    icon: const Icon(Icons.close, size: 14),
+                                    icon: Icon(Icons.close, size: 14),
                                   ),
                             contentPadding: const EdgeInsets.symmetric(
                               horizontal: 6,
@@ -1616,16 +1781,16 @@ class _MeshPageState extends State<MeshPage> with SingleTickerProviderStateMixin
                             border: OutlineInputBorder(
                               borderRadius: BorderRadius.circular(6),
                               borderSide:
-                                  const BorderSide(color: OfflineColors.line),
+                                  BorderSide(color: OfflineColors.line),
                             ),
                             enabledBorder: OutlineInputBorder(
                               borderRadius: BorderRadius.circular(6),
                               borderSide:
-                                  const BorderSide(color: OfflineColors.line),
+                                  BorderSide(color: OfflineColors.line),
                             ),
                             focusedBorder: OutlineInputBorder(
                               borderRadius: BorderRadius.circular(6),
-                              borderSide: const BorderSide(
+                              borderSide: BorderSide(
                                 color: OfflineColors.moss,
                               ),
                             ),
@@ -1926,7 +2091,7 @@ class _MeshPageState extends State<MeshPage> with SingleTickerProviderStateMixin
                     Container(
                       width: 6,
                       height: 6,
-                      decoration: const BoxDecoration(
+                      decoration: BoxDecoration(
                         color: OfflineColors.danger,
                         shape: BoxShape.circle,
                       ),

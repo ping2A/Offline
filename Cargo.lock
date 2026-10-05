@@ -701,6 +701,7 @@ dependencies = [
  "offline-mesh",
  "offline-noise",
  "offline-packet",
+ "rand",
  "serde",
  "thiserror",
  "web-time",
@@ -941,6 +942,7 @@ dependencies = [
  "offline-noise",
  "offline-packet",
  "rand",
+ "web-time",
 ]
 
 [[package]]

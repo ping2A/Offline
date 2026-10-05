@@ -2,7 +2,9 @@
 
 use offline_mesh::{MeshRouter, RelayDecision};
 use offline_noise::{
-    peer_id_from_noise_public, HandshakeRole, Identity, NoiseSession, SessionState,
+    build_verify_challenge_tlv, build_verify_response_tlv, parse_verify_challenge,
+    parse_verify_response, peer_id_from_noise_public, verify_response_signature, HandshakeRole,
+    Identity, NoiseSession, SessionState,
 };
 use offline_packet::{
     build_request_sync_payload, compute_packet_id, decode_file_transfer, decode_fragment_id_filter,
@@ -13,7 +15,8 @@ use offline_packet::{
     SyncCandidate, SyncTypeFlags, BITCHAT_COMPAT_MAX_FRAGMENTS, DEFAULT_TTL,
     MAX_FILE_PAYLOAD_BYTES,
 };
-use std::collections::{HashMap, VecDeque};
+use rand::RngCore;
+use std::collections::{HashMap, HashSet, VecDeque};
 use thiserror::Error;
 use web_time::{SystemTime, UNIX_EPOCH};
 
@@ -113,6 +116,11 @@ pub enum MeshEvent {
         /// `delivered` or `read`.
         kind: String,
     },
+    /// QR / Noise verify completed for this peer (BitChat-compatible).
+    PeerVerified {
+        peer_id: String,
+        nickname: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -154,6 +162,18 @@ pub struct MeshController {
     pending_private_messages: HashMap<String, VecDeque<(String, String)>>,
     /// Ciphertext that arrived before transport was ready (msg3 / race).
     deferred_noise_encrypted: HashMap<String, VecDeque<Packet>>,
+    /// Outbound QR verifications awaiting verifyResponse.
+    pending_verifications: HashMap<String, PendingVerification>,
+    /// Peer IDs successfully verified via QR challenge.
+    verified_peers: HashSet<String>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingVerification {
+    noise_key_hex: String,
+    sign_key_hex: String,
+    nonce: Vec<u8>,
+    sent: bool,
 }
 
 impl MeshController {
@@ -181,6 +201,8 @@ impl MeshController {
             last_announce_ms: 0,
             pending_private_messages: HashMap::new(),
             deferred_noise_encrypted: HashMap::new(),
+            pending_verifications: HashMap::new(),
+            verified_peers: HashSet::new(),
         }
     }
 
@@ -211,6 +233,75 @@ impl MeshController {
             .get(peer_id_hex)
             .map(|p| p.noise_state)
             .unwrap_or(NoiseLinkState::None)
+    }
+
+    pub fn is_verified(&self, peer_id_hex: &str) -> bool {
+        self.verified_peers.contains(peer_id_hex)
+    }
+
+    /// Start BitChat-style QR verification toward a known mesh peer (sends Noise challenge).
+    pub fn start_qr_verification(&mut self, peer_id_hex: &str) -> Result<(), MeshError> {
+        if self.verified_peers.contains(peer_id_hex) {
+            return Ok(());
+        }
+        let (noise_hex, sign_hex) = {
+            let peer = self
+                .peers
+                .get(peer_id_hex)
+                .ok_or_else(|| MeshError::PeerId(format!("unknown peer {peer_id_hex}")))?;
+            let noise = peer
+                .noise_public_key
+                .as_ref()
+                .ok_or_else(|| MeshError::Noise("peer has no Noise key yet (wait for announce)".into()))?;
+            let sign = peer
+                .signing_public_key
+                .as_ref()
+                .ok_or_else(|| {
+                    MeshError::Noise("peer has no signing key yet (wait for announce)".into())
+                })?;
+            (hex::encode(noise), hex::encode(sign))
+        };
+
+        if let Some(existing) = self.pending_verifications.get(peer_id_hex) {
+            if existing.sent {
+                return Ok(());
+            }
+        }
+
+        let mut nonce = vec![0u8; 16];
+        rand::thread_rng().fill_bytes(&mut nonce);
+        let pending = PendingVerification {
+            noise_key_hex: noise_hex.clone(),
+            sign_key_hex: sign_hex,
+            nonce: nonce.clone(),
+            sent: false,
+        };
+        self.pending_verifications
+            .insert(peer_id_hex.to_string(), pending);
+
+        let ready = self
+            .sessions
+            .get(peer_id_hex)
+            .map(|s| s.state() == SessionState::Transport)
+            .unwrap_or(false);
+        if ready {
+            self.send_pending_verify_challenge(peer_id_hex)?;
+        } else {
+            let _ = self.start_noise_handshake(peer_id_hex);
+        }
+        Ok(())
+    }
+
+    fn send_pending_verify_challenge(&mut self, peer_id_hex: &str) -> Result<(), MeshError> {
+        let Some(pending) = self.pending_verifications.get_mut(peer_id_hex) else {
+            return Ok(());
+        };
+        if pending.sent {
+            return Ok(());
+        }
+        let tlv = build_verify_challenge_tlv(&pending.noise_key_hex, &pending.nonce);
+        pending.sent = true;
+        self.queue_noise_payload(peer_id_hex, NoisePayloadType::VerifyChallenge, &tlv)
     }
 
     fn now_ms() -> u64 {
@@ -1309,6 +1400,7 @@ impl MeshController {
         if became_ready {
             self.set_peer_noise_state(from, NoiseLinkState::Ready, "transport ready");
             self.flush_pending_private_messages(from);
+            let _ = self.send_pending_verify_challenge(from);
             self.drain_deferred_noise_encrypted(from)?;
         }
         Ok(())
@@ -1430,6 +1522,52 @@ impl MeshController {
                         kind: "read".into(),
                     });
                 }
+            }
+            Some(NoisePayloadType::VerifyChallenge) => {
+                // BitChat QR verify: prove possession of the Noise key in the QR.
+                let Some((noise_hex, nonce)) = parse_verify_challenge(body) else {
+                    return Ok(());
+                };
+                let my_hex = hex::encode(self.identity.noise_public_key());
+                if !noise_hex.eq_ignore_ascii_case(&my_hex) {
+                    return Ok(());
+                }
+                let tlv = build_verify_response_tlv(&self.identity, &noise_hex, &nonce);
+                let _ = self.queue_noise_payload(from, NoisePayloadType::VerifyResponse, &tlv);
+            }
+            Some(NoisePayloadType::VerifyResponse) => {
+                let Some((noise_hex, nonce, sig)) = parse_verify_response(body) else {
+                    return Ok(());
+                };
+                let Some(pending) = self.pending_verifications.get(from).cloned() else {
+                    return Ok(());
+                };
+                if !noise_hex.eq_ignore_ascii_case(&pending.noise_key_hex)
+                    || nonce != pending.nonce
+                {
+                    return Ok(());
+                }
+                if verify_response_signature(
+                    &noise_hex,
+                    &nonce,
+                    &sig,
+                    &pending.sign_key_hex,
+                )
+                .is_err()
+                {
+                    return Ok(());
+                }
+                self.pending_verifications.remove(from);
+                self.verified_peers.insert(from.to_string());
+                let nickname = self
+                    .peers
+                    .get(from)
+                    .map(|p| p.nickname.clone())
+                    .unwrap_or_else(|| from.to_string());
+                self.events.push_back(MeshEvent::PeerVerified {
+                    peer_id: from.to_string(),
+                    nickname,
+                });
             }
             _ => {}
         }

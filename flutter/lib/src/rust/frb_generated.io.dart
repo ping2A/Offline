@@ -231,7 +231,8 @@ wireObj.bytes = cst_encode_list_prim_u_8_strict(apiObj.bytes); }
 wireObj.nickname = cst_encode_String(apiObj.nickname);
 wireObj.last_seen_ms = cst_encode_u_64(apiObj.lastSeenMs);
 wireObj.noise_state = cst_encode_String(apiObj.noiseState);
-wireObj.has_noise_key = cst_encode_bool(apiObj.hasNoiseKey); }
+wireObj.has_noise_key = cst_encode_bool(apiObj.hasNoiseKey);
+wireObj.verified = cst_encode_bool(apiObj.verified); }
 
 @protected void cst_api_fill_to_wire_mesh_ui_event(MeshUiEvent apiObj, wire_cst_mesh_ui_event wireObj){ wireObj.kind = cst_encode_String(apiObj.kind);
 wireObj.peer_id = cst_encode_String(apiObj.peerId);
@@ -575,6 +576,38 @@ class RustLibWire implements BaseWire {
       );
   late final _store_dart_post_cobject = _store_dart_post_cobjectPtr
       .asFunction<void Function(DartPostCObjectFnType)>();
+
+  WireSyncRust2DartDco wire__crate__api__identity__build_bitchat_verify_qr(
+    ffi.Pointer<wire_cst_list_prim_u_8_loose> noise_secret_key,
+    ffi.Pointer<wire_cst_list_prim_u_8_loose> signing_secret_key,
+    ffi.Pointer<wire_cst_list_prim_u_8_strict> nickname,
+  ) {
+    return _wire__crate__api__identity__build_bitchat_verify_qr(
+      noise_secret_key,
+      signing_secret_key,
+      nickname,
+    );
+  }
+
+  late final _wire__crate__api__identity__build_bitchat_verify_qrPtr =
+      _lookup<
+        ffi.NativeFunction<
+          WireSyncRust2DartDco Function(
+            ffi.Pointer<wire_cst_list_prim_u_8_loose>,
+            ffi.Pointer<wire_cst_list_prim_u_8_loose>,
+            ffi.Pointer<wire_cst_list_prim_u_8_strict>,
+          )
+        >
+      >('frbgen_offline_wire__crate__api__identity__build_bitchat_verify_qr');
+  late final _wire__crate__api__identity__build_bitchat_verify_qr =
+      _wire__crate__api__identity__build_bitchat_verify_qrPtr
+          .asFunction<
+            WireSyncRust2DartDco Function(
+              ffi.Pointer<wire_cst_list_prim_u_8_loose>,
+              ffi.Pointer<wire_cst_list_prim_u_8_loose>,
+              ffi.Pointer<wire_cst_list_prim_u_8_strict>,
+            )
+          >();
 
   WireSyncRust2DartDco wire__crate__api__identity__generate_identity() {
     return _wire__crate__api__identity__generate_identity();
@@ -1020,6 +1053,37 @@ class RustLibWire implements BaseWire {
             )
           >();
 
+  WireSyncRust2DartDco
+  wire__crate__api__mesh__MeshSession_start_qr_verification(
+    int that,
+    ffi.Pointer<wire_cst_list_prim_u_8_strict> peer_id,
+  ) {
+    return _wire__crate__api__mesh__MeshSession_start_qr_verification(
+      that,
+      peer_id,
+    );
+  }
+
+  late final _wire__crate__api__mesh__MeshSession_start_qr_verificationPtr =
+      _lookup<
+        ffi.NativeFunction<
+          WireSyncRust2DartDco Function(
+            ffi.UintPtr,
+            ffi.Pointer<wire_cst_list_prim_u_8_strict>,
+          )
+        >
+      >(
+        'frbgen_offline_wire__crate__api__mesh__MeshSession_start_qr_verification',
+      );
+  late final _wire__crate__api__mesh__MeshSession_start_qr_verification =
+      _wire__crate__api__mesh__MeshSession_start_qr_verificationPtr
+          .asFunction<
+            WireSyncRust2DartDco Function(
+              int,
+              ffi.Pointer<wire_cst_list_prim_u_8_strict>,
+            )
+          >();
+
   WireSyncRust2DartDco wire__crate__api__mesh__mesh_characteristic_uuid() {
     return _wire__crate__api__mesh__mesh_characteristic_uuid();
   }
@@ -1279,6 +1343,10 @@ typedef DartPostCObjectFnTypeFunction =
 typedef DartDartPostCObjectFnTypeFunction =
     bool Function(DartDartPort port_id, ffi.Pointer<ffi.Void> message);
 
+
+
+
+
 final class wire_cst_identity_bundle extends ffi.Struct {
   external ffi.Pointer<wire_cst_list_prim_u_8_strict> peer_id;
 
@@ -1425,6 +1493,9 @@ final class wire_cst_mesh_peer_info extends ffi.Struct {
   @ffi.Bool()
   external bool has_noise_key;
 
+  @ffi.Bool()
+  external bool verified;
+
   static ffi.Pointer<wire_cst_mesh_peer_info> $allocate(
     ffi.Allocator $allocator, {
     required ffi.Pointer<wire_cst_list_prim_u_8_strict> peer_id,
@@ -1432,12 +1503,14 @@ final class wire_cst_mesh_peer_info extends ffi.Struct {
     required int last_seen_ms,
     required ffi.Pointer<wire_cst_list_prim_u_8_strict> noise_state,
     required bool has_noise_key,
+    required bool verified,
   }) => $allocator<wire_cst_mesh_peer_info>()
     ..ref.peer_id = peer_id
     ..ref.nickname = nickname
     ..ref.last_seen_ms = last_seen_ms
     ..ref.noise_state = noise_state
-    ..ref.has_noise_key = has_noise_key;
+    ..ref.has_noise_key = has_noise_key
+    ..ref.verified = verified;
 }
 
 final class wire_cst_mesh_ui_event extends ffi.Struct {
