@@ -58,6 +58,10 @@ impl VerificationQr {
 
     /// Parse a BitChat verify URL (percent-decoded query values).
     pub fn from_url(url: &str) -> Option<Self> {
+        // Bound the whole URL before allocating field strings (S-11).
+        if url.len() > 4096 {
+            return None;
+        }
         let rest = url.strip_prefix("bitchat://verify?")?;
         let mut v = None::<u8>;
         let mut noise = None::<String>;
@@ -69,6 +73,19 @@ impl VerificationQr {
         let mut npub = None::<String>;
         for part in rest.split('&') {
             let (k, raw) = part.split_once('=')?;
+            // Reject oversized fields before decode/hex work.
+            let max_raw = match k {
+                "v" | "ts" => 32,
+                "noise" | "sign" => 128, // 64 hex chars, allow padding
+                "sig" => 256,            // 128 hex chars
+                "nonce" => 64,           // 16-byte base64url
+                "nick" => 96,
+                "npub" => 128,
+                _ => 256,
+            };
+            if raw.len() > max_raw {
+                return None;
+            }
             let val = percent_decode(raw);
             match k {
                 "v" => v = val.parse().ok(),
@@ -213,7 +230,8 @@ fn percent_decode(s: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
+        // `i + 3 <= len` so a trailing `%XX` at end-of-string is decoded (S-11).
+        if bytes[i] == b'%' && i + 3 <= bytes.len() {
             if let (Ok(h), Ok(l)) = (
                 u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 2]).unwrap_or(""), 16),
                 u8::from_str_radix(std::str::from_utf8(&bytes[i + 2..i + 3]).unwrap_or(""), 16),
@@ -402,6 +420,20 @@ mod tests {
         let parsed = VerificationQr::from_url(&qr.to_url_string()).unwrap();
         assert_eq!(parsed.nickname, "a b");
         parsed.verify_signature().unwrap();
+    }
+
+    #[test]
+    fn percent_decode_trailing_escape() {
+        assert_eq!(percent_decode("a%20b"), "a b");
+        // Trailing %XX at end-of-string must decode (S-11).
+        assert_eq!(percent_decode("%41"), "A");
+        assert_eq!(percent_decode("x%2F"), "x/");
+    }
+
+    #[test]
+    fn from_url_rejects_oversized_fields() {
+        let huge = "bitchat://verify?v=1&noise=".to_string() + &"ab".repeat(100);
+        assert!(VerificationQr::from_url(&huge).is_none());
     }
 
     #[test]

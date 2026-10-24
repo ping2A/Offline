@@ -3,6 +3,12 @@
 pub const HEADER_LEN: usize = 20;
 pub const MAGIC0: u8 = 0xD1;
 pub const MAGIC1: u8 = 0x0C;
+/// Hard ceiling for optical payloads (matches mesh file limit).
+pub const MAX_OPTICAL_BYTES: usize = 1 * 1024 * 1024;
+/// Max source blocks `k` accepted from a QR header.
+pub const MAX_OPTICAL_K: u16 = 8192;
+/// Max block length accepted from a QR header (bytes).
+pub const MAX_OPTICAL_BLOCK_LEN: u16 = 2048;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameHeader {
@@ -42,6 +48,14 @@ pub fn parse_frame(bytes: &[u8]) -> Option<(FrameHeader, &[u8])> {
     let total_len = u32::from_le_bytes(bytes[12..16].try_into().ok()?);
     let payload_fnv = u32::from_le_bytes(bytes[16..20].try_into().ok()?);
     if k == 0 || block_len == 0 || total_len == 0 {
+        return None;
+    }
+    // Reject hostile allocation sizes before the decoder allocates (S-5).
+    if k > MAX_OPTICAL_K
+        || block_len > MAX_OPTICAL_BLOCK_LEN
+        || total_len as usize > MAX_OPTICAL_BYTES
+        || (total_len as u64) > (k as u64) * (block_len as u64)
+    {
         return None;
     }
     if bytes.len() != HEADER_LEN + block_len as usize {
@@ -86,6 +100,20 @@ pub fn splitmix32(seed: u32) -> impl FnMut() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_oversized_total_len() {
+        let h = FrameHeader {
+            session_id: 1,
+            seq: 0,
+            k: 1,
+            block_len: 4,
+            total_len: (MAX_OPTICAL_BYTES as u32) + 1,
+            payload_fnv: 0,
+        };
+        let packed = pack_frame(&h, &[1, 2, 3, 4]);
+        assert!(parse_frame(&packed).is_none());
+    }
 
     #[test]
     fn frame_roundtrip() {

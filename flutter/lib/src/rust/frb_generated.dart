@@ -124,6 +124,11 @@ abstract class RustLibApi extends BaseApi {
       required String peerId,
       required String text});
 
+  void crateApiMeshMeshSessionQueueReadReceipt(
+      {required MeshSession that,
+      required String peerId,
+      required String messageId});
+
   void crateApiMeshMeshSessionQueuePublicMessage(
       {required MeshSession that, required String text});
 
@@ -577,6 +582,37 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(
         debugName: "MeshSession_queue_private_message",
         argNames: ["that", "peerId", "text"],
+      );
+
+  @override
+  void crateApiMeshMeshSessionQueueReadReceipt(
+      {required MeshSession that,
+      required String peerId,
+      required String messageId}) {
+    return handler.executeSync(SyncTask(
+      callFfi: () {
+        var arg0 =
+            cst_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerMeshSession(
+                that);
+        var arg1 = cst_encode_String(peerId);
+        var arg2 = cst_encode_String(messageId);
+        return wire.wire__crate__api__mesh__MeshSession_queue_read_receipt(
+            arg0, arg1, arg2);
+      },
+      codec: DcoCodec(
+        decodeSuccessData: dco_decode_unit,
+        decodeErrorData: dco_decode_String,
+      ),
+      constMeta: kCrateApiMeshMeshSessionQueueReadReceiptConstMeta,
+      argValues: [that, peerId, messageId],
+      apiImpl: this,
+    ));
+  }
+
+  TaskConstMeta get kCrateApiMeshMeshSessionQueueReadReceiptConstMeta =>
+      const TaskConstMeta(
+        debugName: "MeshSession_queue_read_receipt",
+        argNames: ["that", "peerId", "messageId"],
       );
 
   @override
@@ -2275,6 +2311,10 @@ class MeshSessionImpl extends RustOpaque implements MeshSession {
   void queuePrivateMessage({required String peerId, required String text}) =>
       RustLib.instance.api.crateApiMeshMeshSessionQueuePrivateMessage(
           that: this, peerId: peerId, text: text);
+
+  void queueReadReceipt({required String peerId, required String messageId}) =>
+      RustLib.instance.api.crateApiMeshMeshSessionQueueReadReceipt(
+          that: this, peerId: peerId, messageId: messageId);
 
   void queuePublicMessage({required String text}) => RustLib.instance.api
       .crateApiMeshMeshSessionQueuePublicMessage(that: this, text: text);

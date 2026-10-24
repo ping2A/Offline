@@ -3,8 +3,10 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:offline/ui/app_theme.dart';
 import 'package:offline/ui/identity_page.dart';
 import 'package:offline/ui/identity_store.dart';
+import 'package:offline/ui/mesh_help.dart';
 import 'package:offline/ui/mesh_page.dart';
 import 'package:offline/ui/optical_page.dart';
+import 'package:offline/version.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key, required this.identity});
@@ -161,9 +163,19 @@ class _HomePageState extends State<HomePage> {
                 const SizedBox(height: 2),
               ],
               const Spacer(),
+              const MeshHelpButton(compact: true),
               const OfflineThemeButton(),
               const SizedBox(height: 8),
               _peerChip(),
+              const SizedBox(height: 8),
+              Text(
+                kVersionLabel,
+                style: GoogleFonts.ibmPlexMono(
+                  fontSize: 9,
+                  color: OfflineColors.mist,
+                  height: 1.3,
+                ),
+              ),
             ],
           ),
         ),
@@ -203,7 +215,19 @@ class _HomePageState extends State<HomePage> {
                 color: OfflineColors.ink,
               ),
             ),
+            const SizedBox(width: 8),
+            Flexible(
+              child: Text(
+                'v$kClientVersion',
+                overflow: TextOverflow.ellipsis,
+                style: GoogleFonts.ibmPlexMono(
+                  fontSize: 10,
+                  color: OfflineColors.mist,
+                ),
+              ),
+            ),
             const Spacer(),
+            const MeshHelpButton(compact: true),
             const OfflineThemeButton(),
             const SizedBox(width: 8),
             _peerChip(),

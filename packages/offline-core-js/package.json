@@ -1,0 +1,33 @@
+{
+  "name": "@offline/core",
+  "version": "0.1.0",
+  "license": "GPL-3.0-or-later",
+  "description": "WebAssembly/JS bindings for the Offline mesh + optical core",
+  "type": "module",
+  "sideEffects": ["*.wasm"],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./wasm": "./pkg/offline_wasm_bg.wasm"
+  },
+  "files": ["dist", "pkg"],
+  "scripts": {
+    "setup": "npm install && npm run build && npm test",
+    "build:wasm": "wasm-pack build ../../crates/offline-wasm --release --target web --out-dir ../../packages/offline-core-js/pkg",
+    "build:ts": "tsc -p tsconfig.json",
+    "build": "npm run build:wasm && npm run build:ts",
+    "test": "vitest run",
+    "demo": "node demo/node-demo.mjs",
+    "demo:web": "npx --yes serve -p 4173 .",
+    "ui": "npm start --prefix ../offline-web"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.4"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

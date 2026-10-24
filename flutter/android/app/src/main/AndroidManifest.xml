@@ -17,7 +17,7 @@
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true"/>
 
     <application
-        android:usesCleartextTraffic="true"
+        android:allowBackup="false"
         android:label="Offline"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">

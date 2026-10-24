@@ -52,6 +52,9 @@ abstract class MeshSession implements RustOpaqueInterface {
 
   void queuePrivateMessage({required String peerId, required String text});
 
+  /// BitChat Noise `readReceipt` (body = message / media id).
+  void queueReadReceipt({required String peerId, required String messageId});
+
   void queuePublicMessage({required String text});
 
   /// Pull recent public channel messages (BitChat `requestSync`).

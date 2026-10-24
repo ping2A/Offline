@@ -42,3 +42,9 @@ flutter/web/pkg/
 .env
 .env.*
 !.env.example
+
+# Node / JS packages
+**/node_modules/
+packages/offline-web/dist/
+packages/offline-core-js/dist/
+/dist/

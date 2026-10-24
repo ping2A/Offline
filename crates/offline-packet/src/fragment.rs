@@ -27,6 +27,11 @@ pub const BITCHAT_COMPAT_MAX_FRAGMENTS: usize = 256;
 /// for Offline↔Offline. Callers targeting BitChat should stay ≤
 /// [`BITCHAT_COMPAT_MAX_FRAGMENTS`].
 pub const MAX_FRAGMENTS_PER_PACKET: usize = u16::MAX as usize;
+/// Soft cap on `total` accepted during reassembly (S-7). Above this, refuse the set
+/// unless the caller raised [`FragmentReassembler::max_fragments_per_set`].
+pub const DEFAULT_MAX_REASSEMBLY_FRAGMENTS: u16 = BITCHAT_COMPAT_MAX_FRAGMENTS as u16;
+/// Global byte budget across all incomplete fragment sets (S-7).
+pub const DEFAULT_MAX_REASSEMBLY_BYTES: usize = 2 * 1024 * 1024;
 /// BitChat uses 30 s; we keep a longer window so slow links can still finish
 /// receiving BitChat media after partial loss/retry.
 pub const FRAGMENT_ASSEMBLY_TIMEOUT_SECS: u64 = 120;
@@ -136,12 +141,16 @@ pub fn maybe_fragment_sized(
 pub struct FragmentReassembler {
     sets: std::collections::HashMap<[u8; FRAGMENT_ID_SIZE], FragmentSet>,
     max_sets: usize,
+    max_fragments_per_set: u16,
+    max_buffered_bytes: usize,
+    buffered_bytes: usize,
 }
 
 struct FragmentSet {
     total: u16,
     original_type: u8,
     parts: std::collections::HashMap<u16, Vec<u8>>,
+    buffered_bytes: usize,
     created: web_time::Instant,
     #[allow(dead_code)]
     sender: PeerId,
@@ -166,7 +175,22 @@ impl FragmentReassembler {
         Self {
             sets: std::collections::HashMap::new(),
             max_sets,
+            max_fragments_per_set: DEFAULT_MAX_REASSEMBLY_FRAGMENTS,
+            max_buffered_bytes: DEFAULT_MAX_REASSEMBLY_BYTES,
+            buffered_bytes: 0,
         }
+    }
+
+    /// Raise the per-set fragment cap (Offline↔Offline large file trains).
+    pub fn with_max_fragments_per_set(mut self, max: u16) -> Self {
+        self.max_fragments_per_set = max.max(1);
+        self
+    }
+
+    /// Raise the global incomplete-buffer budget (default 2 MiB).
+    pub fn with_max_buffered_bytes(mut self, max: usize) -> Self {
+        self.max_buffered_bytes = max.max(MAX_FRAGMENT_CHUNK);
+        self
     }
 
     /// Feed a decoded fragment packet. Returns reassembled original wire bytes when complete.
@@ -175,12 +199,28 @@ impl FragmentReassembler {
             return None;
         }
         let fp = FragmentPayload::decode(&packet.payload)?;
+        // Nested fragment wrappers (original_type == Fragment) enable unbounded
+        // re-entry recursion in mesh ingest — reject them (S-3).
+        if fp.original_type == MessageType::Fragment as u8 {
+            return None;
+        }
+        if fp.total == 0 || fp.total > self.max_fragments_per_set {
+            return None;
+        }
         self.purge_expired();
+
+        let is_new = !self.sets.contains_key(&fp.fragment_id);
+        if is_new {
+            while self.sets.len() >= self.max_sets {
+                self.evict_oldest()?;
+            }
+        }
 
         let entry = self.sets.entry(fp.fragment_id).or_insert_with(|| FragmentSet {
             total: fp.total,
             original_type: fp.original_type,
             parts: std::collections::HashMap::new(),
+            buffered_bytes: 0,
             created: web_time::Instant::now(),
             sender: packet.sender_id,
             recipient: packet.recipient_id,
@@ -192,8 +232,37 @@ impl FragmentReassembler {
         if entry.total != fp.total || entry.original_type != fp.original_type {
             return None;
         }
-        entry.parts.insert(fp.index, fp.data);
+        let part_len = fp.data.len();
+        if let Some(old) = entry.parts.insert(fp.index, fp.data) {
+            entry.buffered_bytes = entry.buffered_bytes.saturating_sub(old.len());
+            self.buffered_bytes = self.buffered_bytes.saturating_sub(old.len());
+        }
+        entry.buffered_bytes = entry.buffered_bytes.saturating_add(part_len);
+        self.buffered_bytes = self.buffered_bytes.saturating_add(part_len);
 
+        while self.buffered_bytes > self.max_buffered_bytes {
+            // Prefer evicting a set that is not the one we just updated.
+            let victim = self
+                .sets
+                .iter()
+                .filter(|(id, _)| **id != fp.fragment_id)
+                .min_by_key(|(_, s)| s.created)
+                .map(|(k, _)| *k)
+                .or_else(|| {
+                    self.sets
+                        .iter()
+                        .min_by_key(|(_, s)| s.created)
+                        .map(|(k, _)| *k)
+                })?;
+            if !self.remove_set(&victim) {
+                break;
+            }
+            if victim == fp.fragment_id {
+                return None;
+            }
+        }
+
+        let entry = self.sets.get(&fp.fragment_id)?;
         if entry.parts.len() != entry.total as usize {
             return None;
         }
@@ -203,22 +272,42 @@ impl FragmentReassembler {
             assembled.extend_from_slice(entry.parts.get(&i)?);
         }
         let id = fp.fragment_id;
-        self.sets.remove(&id);
+        self.remove_set(&id);
         Some(assembled)
+    }
+
+    fn remove_set(&mut self, id: &[u8; FRAGMENT_ID_SIZE]) -> bool {
+        if let Some(set) = self.sets.remove(id) {
+            self.buffered_bytes = self.buffered_bytes.saturating_sub(set.buffered_bytes);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn evict_oldest(&mut self) -> Option<()> {
+        let oldest = self
+            .sets
+            .iter()
+            .min_by_key(|(_, s)| s.created)
+            .map(|(k, _)| *k)?;
+        self.remove_set(&oldest);
+        Some(())
     }
 
     fn purge_expired(&mut self) {
         let timeout = std::time::Duration::from_secs(FRAGMENT_ASSEMBLY_TIMEOUT_SECS);
-        self.sets.retain(|_, s| s.created.elapsed() < timeout);
+        let expired: Vec<_> = self
+            .sets
+            .iter()
+            .filter(|(_, s)| s.created.elapsed() >= timeout)
+            .map(|(k, _)| *k)
+            .collect();
+        for id in expired {
+            self.remove_set(&id);
+        }
         while self.sets.len() > self.max_sets {
-            if let Some(oldest) = self
-                .sets
-                .iter()
-                .min_by_key(|(_, s)| s.created)
-                .map(|(k, _)| *k)
-            {
-                self.sets.remove(&oldest);
-            } else {
+            if self.evict_oldest().is_none() {
                 break;
             }
         }
@@ -332,7 +421,7 @@ mod tests {
             encoded.len()
         );
 
-        let mut re = FragmentReassembler::new(8);
+        let mut re = FragmentReassembler::new(8).with_max_fragments_per_set(u16::MAX);
         let mut done = None;
         for frame in &frames {
             let p = Packet::decode(frame).unwrap();

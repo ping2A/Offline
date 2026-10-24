@@ -142,7 +142,7 @@ class WebMeshTransport implements MeshTransport {
   }
 
   @override
-  Future<void> send(Uint8List bytes) async {
+  Future<void> send(Uint8List bytes, {bool reliable = false}) async {
     // Copy into a tight buffer so BLE/BroadcastChannel never see a larger view.
     final copy = Uint8List.fromList(bytes);
     _bc?.postMessage(copy.toJS);
@@ -152,14 +152,28 @@ class WebMeshTransport implements MeshTransport {
       return;
     }
     if (_bleLinks.isNotEmpty) {
-      _bleLog('BLE → phone', '${copy.length} bytes × ${_bleLinks.length} link(s)');
+      _bleLog(
+        'BLE → mesh',
+        '${copy.length} bytes × ${_bleLinks.length} link(s)'
+        '${reliable ? ' reliable' : ''}',
+      );
     }
     for (final link in List<_BleLink>.from(_bleLinks)) {
       try {
-        await link.write(copy);
+        await link.write(copy, reliable: reliable);
       } catch (e) {
         _bleLog('BLE write failed', '${link.name}: $e');
         final msg = e.toString();
+        if (reliable &&
+            !msg.contains('512') &&
+            !msg.contains('InvalidModificationError')) {
+          try {
+            await link.write(copy, reliable: true);
+            continue;
+          } catch (e2) {
+            _bleLog('BLE retry failed', '${link.name}: $e2');
+          }
+        }
         // One bad frame must not tear down the link mid voice/photo train.
         if (msg.contains('512') || msg.contains('InvalidModificationError')) {
           continue;
@@ -217,9 +231,9 @@ class WebMeshTransport implements MeshTransport {
     }
   }
 
-  /// Default: only mesh service UUID + Offline-named phones.
-  /// BitChat has no local name; it still matches the service-UUID filters.
-  /// [showAllDevices] is an explicit escape hatch (long-press Join).
+  /// Default: mesh service UUID + Offline name filters.
+  /// On Linux (and when the filtered scan is empty), use acceptAllDevices —
+  /// BlueZ often misses BitChat’s service UUID in advertisements.
   Future<JSObject> _requestDevice({required bool showAllDevices}) async {
     final bridge = _offlineBleBridge();
     Future<JSObject> request(JSAny options) async {
@@ -236,16 +250,18 @@ class WebMeshTransport implements MeshTransport {
           as JSObject;
     }
 
-    if (showAllDevices) {
+    final allOpts = {
+      'acceptAllDevices': true,
+      'optionalServices': _meshServiceUuids,
+    }.jsify()!;
+
+    // Linux Chrome Web Bluetooth is experimental; service filters rarely match.
+    final preferAll = showAllDevices || _isLinuxDesktop;
+    if (preferAll) {
       _bleLog('requestDevice(acceptAllDevices)');
-      return request({
-        'acceptAllDevices': true,
-        'optionalServices': _meshServiceUuids,
-      }.jsify()!);
+      return request(allOpts);
     }
 
-    // Service UUID filters only (+ Offline name). Do not use acceptAllDevices
-    // here — that floods the chooser with headphones/keyboards/etc.
     final filtered = {
       'filters': [
         {'services': [meshServiceUuid]},
@@ -264,12 +280,33 @@ class WebMeshTransport implements MeshTransport {
       if (msg.contains('abort') || msg.contains('cancel')) {
         rethrow;
       }
-      // NotFoundError / empty chooser — surface a clear next step.
-      throw StateError(
-        'No mesh device found. Keep BitChat open in the foreground, then '
-        'tap Join again — or long-press Join to browse all Bluetooth devices. ($e)',
-      );
+      _bleLog('filtered scan empty; falling back to acceptAllDevices', e);
+      try {
+        return await request(allOpts);
+      } catch (e2) {
+        final msg2 = e2.toString().toLowerCase();
+        if (msg2.contains('abort') || msg2.contains('cancel')) {
+          rethrow;
+        }
+        throw StateError(_linuxBleHint(e2.toString()));
+      }
     }
+  }
+
+  static bool get _isLinuxDesktop {
+    final ua = web.window.navigator.userAgent;
+    return ua.contains('Linux') && !ua.contains('Android');
+  }
+
+  static String _linuxBleHint(String detail) {
+    if (_isLinuxDesktop) {
+      return 'No Bluetooth devices on Linux. In Chrome enable '
+          'chrome://flags/#enable-experimental-web-platform-features, '
+          'Relaunch, turn Bluetooth on (BlueZ 5.41+). BitChat is often unnamed. '
+          '($detail)';
+    }
+    return 'No mesh device found. Keep BitChat open, then try Mesh again — '
+        'or long-press Mesh to browse all devices. ($detail)';
   }
 
   Future<void> _attachDevice(JSObject device, {required bool fromPicker}) async {
@@ -352,7 +389,7 @@ class WebMeshTransport implements MeshTransport {
       name: name,
       id: id,
       onPacket: (bytes) {
-        _bleLog('BLE ← phone', '${bytes.length} bytes from $name');
+        _bleLog('BLE ← mesh', '${bytes.length} bytes from $name');
         onPacket?.call(bytes);
       },
       onClosed: () {
@@ -364,7 +401,7 @@ class WebMeshTransport implements MeshTransport {
     );
     await link.startNotifications();
     _bleLinks.add(link);
-    _bleLog('phone linked', '$name (ble=${_bleLinks.length})');
+    _bleLog('mesh peer linked', '$name (ble=${_bleLinks.length})');
     _emitLinks();
     _emitBleDevices();
   }
@@ -503,7 +540,7 @@ class _BleLink {
     );
   }
 
-  Future<void> write(Uint8List bytes) async {
+  Future<void> write(Uint8List bytes, {bool reliable = false}) async {
     // Web Bluetooth hard-caps attribute values at 512 bytes.
     if (bytes.length > 512) {
       throw StateError(
@@ -523,11 +560,17 @@ class _BleLink {
           .toDart;
     }
 
+    if (reliable && withResponse) {
+      await attempt('writeValueWithResponse');
+      return;
+    }
     if (withoutResponse) {
       try {
         await attempt('writeValueWithoutResponse');
-        // Pace fragment storms — browsers resolve before the controller buffer drains.
-        await Future<void>.delayed(const Duration(milliseconds: 12));
+        // Fragment trains need more airtime than tiny control packets.
+        await Future<void>.delayed(
+          Duration(milliseconds: reliable ? 28 : 12),
+        );
         return;
       } catch (e) {
         _bleLog('writeWithoutResponse failed, trying withResponse', e);

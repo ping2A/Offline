@@ -1,3 +1,4 @@
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:image/image.dart' as img;
@@ -57,13 +58,20 @@ Uint8List? compressMeshJpeg(
 bool _isJpeg(Uint8List bytes) =>
     bytes.length >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF;
 
-String meshImageFileName(String? name) {
-  final base = (name == null || name.trim().isEmpty) ? 'photo.jpg' : name.trim();
-  if (base.toLowerCase().endsWith('.jpg') ||
-      base.toLowerCase().endsWith('.jpeg')) {
-    return base;
-  }
-  final dot = base.lastIndexOf('.');
-  if (dot > 0) return '${base.substring(0, dot)}.jpg';
-  return '$base.jpg';
+/// BitChat `ImageUtils`: `img_yyyyMMdd_HHmmss_<UUID>.jpg` (receipt-eligible).
+String meshImageFileName([String? _ignored]) {
+  final now = DateTime.now();
+  String two(int n) => n.toString().padLeft(2, '0');
+  final stamp =
+      '${now.year}${two(now.month)}${two(now.day)}_'
+      '${two(now.hour)}${two(now.minute)}${two(now.second)}';
+  // RFC-4122 string form required by BitChat stable-media identity.
+  final bytes = List<int>.generate(16, (_) => Random().nextInt(256));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  final hex = bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+  final uuid =
+      '${hex.substring(0, 8)}-${hex.substring(8, 12)}-${hex.substring(12, 16)}-'
+      '${hex.substring(16, 20)}-${hex.substring(20)}';
+  return 'img_${stamp}_$uuid.jpg';
 }

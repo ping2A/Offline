@@ -5,7 +5,7 @@ abstract class MeshTransport {
   void Function(Uint8List bytes)? onPacket;
   void Function(int count)? onLinkCount;
 
-  /// Names of phones currently linked over Web Bluetooth (web only).
+  /// Names of mesh peers linked over Web Bluetooth (web only).
   void Function(List<String> names)? onBleDevices;
 
   Future<void> start({
@@ -15,13 +15,15 @@ abstract class MeshTransport {
 
   Future<void> stop();
 
-  Future<void> send(Uint8List bytes);
+  /// Send one BitChat frame. When [reliable] is true (fragment trains), prefer
+  /// acknowledged GATT writes so private images reassemble on BitChat.
+  Future<void> send(Uint8List bytes, {bool reliable = false});
 
   int linkCount();
 
-  /// Web: prompt user to pick a nearby Offline/BitChat phone via Web Bluetooth.
+  /// Web: pick a nearby Offline/BitChat peer via this desktop’s Bluetooth.
   /// When [showAllDevices] is true, Chrome lists every Bluetooth peripheral
-  /// (escape hatch if filtered discovery misses a nameless BitChat iPhone).
+  /// (escape hatch if filtered discovery misses a nameless BitChat device).
   Future<void> connectNearbyDevice({bool showAllDevices = false}) async {}
 
   /// Whether this browser exposes Web Bluetooth (Chrome/Edge).

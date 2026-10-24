@@ -1,0 +1,8 @@
+# Offline release identity — keep in sync with:
+#   Cargo.toml [workspace.package] version
+#   flutter/pubspec.yaml version (before +build)
+#   packages/offline-core-js/package.json
+#   packages/offline-web/package.json
+CLIENT_VERSION=0.1.0
+PROTOCOL_ID=bitchat-mesh
+PROTOCOL_VERSION=1

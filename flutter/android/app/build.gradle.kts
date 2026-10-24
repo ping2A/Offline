@@ -32,8 +32,10 @@ android {
 
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
+            // SECURITY (S-10): debug-signed releases are not upgrade-safe and use a
+            // publicly-known key. Configure a real release keystore (e.g. via
+            // key.properties + signingConfigs.release) before distributing v* tags.
+            // Kept as debug only so local `flutter run --release` still works.
             signingConfig = signingConfigs.getByName("debug")
         }
     }

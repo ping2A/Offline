@@ -531,6 +531,48 @@ fn wire__crate__api__mesh__MeshSession_queue_private_message_impl(
         },
     )
 }
+fn wire__crate__api__mesh__MeshSession_queue_read_receipt_impl(
+    that: impl CstDecode<
+        RustOpaqueNom<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<MeshSession>>,
+    >,
+    peer_id: impl CstDecode<String>,
+    message_id: impl CstDecode<String>,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::DcoCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "MeshSession_queue_read_receipt",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let api_that = that.cst_decode();
+            let api_peer_id = peer_id.cst_decode();
+            let api_message_id = message_id.cst_decode();
+            transform_result_dco::<_, _, String>((move || {
+                let mut api_that_guard = None;
+                let decode_indices_ =
+                    flutter_rust_bridge::for_generated::lockable_compute_decode_order(vec![
+                        flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                            &api_that, 0, false,
+                        ),
+                    ]);
+                for i in decode_indices_ {
+                    match i {
+                        0 => api_that_guard = Some(api_that.lockable_decode_sync_ref()),
+                        _ => unreachable!(),
+                    }
+                }
+                let api_that_guard = api_that_guard.unwrap();
+                let output_ok = crate::api::mesh::MeshSession::queue_read_receipt(
+                    &*api_that_guard,
+                    api_peer_id,
+                    api_message_id,
+                )?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
 fn wire__crate__api__mesh__MeshSession_queue_public_message_impl(
     that: impl CstDecode<
         RustOpaqueNom<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<MeshSession>>,
@@ -2486,6 +2528,15 @@ mod io {
     }
 
     #[unsafe(no_mangle)]
+    pub extern "C" fn frbgen_offline_wire__crate__api__mesh__MeshSession_queue_read_receipt(
+        that: usize,
+        peer_id: *mut wire_cst_list_prim_u_8_strict,
+        message_id: *mut wire_cst_list_prim_u_8_strict,
+    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
+        wire__crate__api__mesh__MeshSession_queue_read_receipt_impl(that, peer_id, message_id)
+    }
+
+    #[unsafe(no_mangle)]
     pub extern "C" fn frbgen_offline_wire__crate__api__mesh__MeshSession_queue_public_message(
         that: usize,
         text: *mut wire_cst_list_prim_u_8_strict,
@@ -3346,6 +3397,15 @@ mod web {
         text: String,
     ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
         wire__crate__api__mesh__MeshSession_queue_private_message_impl(that, peer_id, text)
+    }
+
+    #[wasm_bindgen]
+    pub fn wire__crate__api__mesh__MeshSession_queue_read_receipt(
+        that: flutter_rust_bridge::for_generated::wasm_bindgen::JsValue,
+        peer_id: String,
+        message_id: String,
+    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
+        wire__crate__api__mesh__MeshSession_queue_read_receipt_impl(that, peer_id, message_id)
     }
 
     #[wasm_bindgen]

@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>@offline/core demo</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: ui-sans-serif, system-ui, sans-serif;
+      }
+      body {
+        max-width: 40rem;
+        margin: 2rem auto;
+        padding: 0 1rem;
+        line-height: 1.45;
+      }
+      pre {
+        background: color-mix(in srgb, CanvasText 8%, Canvas);
+        padding: 0.75rem 1rem;
+        border-radius: 0.5rem;
+        overflow: auto;
+      }
+      button {
+        font: inherit;
+        padding: 0.4rem 0.9rem;
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>@offline/core</h1>
+    <p>Two in-page mesh peers over a shared byte bus (no BLE).</p>
+    <p>
+      <button id="run">Run demo</button>
+    </p>
+    <pre id="log">Click Run demo…</pre>
+    <script type="module">
+      import { init, Identity, MeshController } from "../dist/index.js";
+
+      const logEl = document.getElementById("log");
+      const lines = [];
+      const log = (s) => {
+        lines.push(s);
+        logEl.textContent = lines.join("\n");
+      };
+
+      document.getElementById("run").onclick = async () => {
+        lines.length = 0;
+        log("loading wasm…");
+        // Web target fetches the sibling .wasm next to the generated JS.
+        await init(new URL("../pkg/offline_wasm_bg.wasm", import.meta.url));
+
+        const alice = new MeshController(new Identity(), "alice");
+        const bob = new MeshController(new Identity(), "bob");
+        alice.setLinkCount(1);
+        bob.setLinkCount(1);
+
+        const bus = (from, to) => {
+          for (const f of from.drainOutbound()) to.ingestFrame(f.bytes);
+        };
+
+        alice.queueAnnounce();
+        bob.queueAnnounce();
+        bus(alice, bob);
+        bus(bob, alice);
+
+        alice.queuePublicMessage("hello browser mesh");
+        bus(alice, bob);
+        const ev = bob.drainEvents().find((e) => e.kind === "message");
+        log(`alice: ${alice.peerId()}`);
+        log(`bob:   ${bob.peerId()}`);
+        log(`bob got: ${ev?.text ?? "(nothing)"}`);
+        log("ok");
+      };
+    </script>
+  </body>
+</html>

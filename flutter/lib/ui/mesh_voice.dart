@@ -79,10 +79,13 @@ String meshVoiceFileName({required String extension}) {
   final stamp =
       '${now.year}${two(now.month)}${two(now.day)}_'
       '${two(now.hour)}${two(now.minute)}${two(now.second)}';
-  final rnd = Random();
-  final uuid = List.generate(16, (_) => rnd.nextInt(256))
-      .map((b) => b.toRadixString(16).padLeft(2, '0'))
-      .join();
+  final bytes = List<int>.generate(16, (_) => Random().nextInt(256));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  final hex = bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+  final uuid =
+      '${hex.substring(0, 8)}-${hex.substring(8, 12)}-${hex.substring(12, 16)}-'
+      '${hex.substring(16, 20)}-${hex.substring(20)}';
   final ext = extension.toLowerCase() == 'm4a' || extension.toLowerCase() == 'mp4'
       ? 'm4a'
       : extension.toLowerCase();

@@ -1,9 +1,13 @@
 //! Offline core façade: identity, mesh packets, optical transfers.
 
 mod mesh_ctrl;
+pub mod version;
 
 pub use mesh_ctrl::{
     MeshController, MeshError, MeshEvent, MeshPeer, NoiseLinkState, OutboundFrame,
+};
+pub use version::{
+    protocol_label, version_label, CLIENT_VERSION, PROTOCOL_ID, PROTOCOL_VERSION,
 };
 
 use offline_fountain::{

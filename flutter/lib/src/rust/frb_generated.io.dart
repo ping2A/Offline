@@ -920,6 +920,41 @@ class RustLibWire implements BaseWire {
             )
           >();
 
+  WireSyncRust2DartDco
+  wire__crate__api__mesh__MeshSession_queue_read_receipt(
+    int that,
+    ffi.Pointer<wire_cst_list_prim_u_8_strict> peer_id,
+    ffi.Pointer<wire_cst_list_prim_u_8_strict> message_id,
+  ) {
+    return _wire__crate__api__mesh__MeshSession_queue_read_receipt(
+      that,
+      peer_id,
+      message_id,
+    );
+  }
+
+  late final _wire__crate__api__mesh__MeshSession_queue_read_receiptPtr =
+      _lookup<
+        ffi.NativeFunction<
+          WireSyncRust2DartDco Function(
+            ffi.UintPtr,
+            ffi.Pointer<wire_cst_list_prim_u_8_strict>,
+            ffi.Pointer<wire_cst_list_prim_u_8_strict>,
+          )
+        >
+      >(
+        'frbgen_offline_wire__crate__api__mesh__MeshSession_queue_read_receipt',
+      );
+  late final _wire__crate__api__mesh__MeshSession_queue_read_receipt =
+      _wire__crate__api__mesh__MeshSession_queue_read_receiptPtr
+          .asFunction<
+            WireSyncRust2DartDco Function(
+              int,
+              ffi.Pointer<wire_cst_list_prim_u_8_strict>,
+              ffi.Pointer<wire_cst_list_prim_u_8_strict>,
+            )
+          >();
+
   WireSyncRust2DartDco wire__crate__api__mesh__MeshSession_queue_public_message(
     int that,
     ffi.Pointer<wire_cst_list_prim_u_8_strict> text,

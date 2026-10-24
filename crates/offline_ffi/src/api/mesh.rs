@@ -149,6 +149,29 @@ impl MeshSession {
             .map_err(|e| e.to_string())
     }
 
+    /// Directed private file with optional legacy (`0x22`) consent after user prompt.
+    /// Requires `flutter_rust_bridge_codegen generate` after pulling this API.
+    #[flutter_rust_bridge::frb(sync)]
+    pub fn queue_file_allow_legacy(
+        &self,
+        file_name: String,
+        mime_type: String,
+        content: Vec<u8>,
+        to_peer_id: Option<String>,
+    ) -> Result<(), String> {
+        self.inner
+            .lock()
+            .expect("mesh")
+            .queue_file_ex(
+                &file_name,
+                &mime_type,
+                content,
+                to_peer_id.as_deref(),
+                true,
+            )
+            .map_err(|e| e.to_string())
+    }
+
     #[flutter_rust_bridge::frb(sync)]
     pub fn start_noise_handshake(&self, peer_id: String) -> Result<(), String> {
         self.inner
@@ -174,6 +197,16 @@ impl MeshSession {
             .lock()
             .expect("mesh")
             .queue_private_message(&peer_id, &text)
+            .map_err(|e| e.to_string())
+    }
+
+    /// BitChat Noise `readReceipt` / private-media seen ack (body = message id).
+    #[flutter_rust_bridge::frb(sync)]
+    pub fn queue_read_receipt(&self, peer_id: String, message_id: String) -> Result<(), String> {
+        self.inner
+            .lock()
+            .expect("mesh")
+            .queue_read_receipt(&peer_id, &message_id)
             .map_err(|e| e.to_string())
     }
 
@@ -270,13 +303,19 @@ fn map_event(e: MeshEvent) -> MeshUiEvent {
             from_peer_id,
             text,
             timestamp_ms,
+            signed,
         } => MeshUiEvent {
             kind: "message".into(),
             peer_id: from_peer_id,
             nickname: String::new(),
             text,
             timestamp_ms,
-            detail: String::new(),
+            // Surface signature status without a FRB schema break (S-9).
+            detail: match signed {
+                Some(true) => "signed".into(),
+                Some(false) => "invalid_sig".into(),
+                None => "unsigned".into(),
+            },
             is_private: false,
             file_name: String::new(),
             file_bytes: Vec::new(),
@@ -332,16 +371,43 @@ fn map_event(e: MeshEvent) -> MeshUiEvent {
             timestamp_ms,
             is_private,
             is_local: _,
+            message_id,
         } => MeshUiEvent {
             kind: "file".into(),
             peer_id: from_peer_id,
-            nickname: String::new(),
+            // Stable private-media id for receipts (BitChat `media-…`); empty otherwise.
+            nickname: message_id,
             text: file_name.clone(),
             timestamp_ms,
             detail: mime_type,
             is_private,
             file_name,
             file_bytes: content,
+        },
+        MeshEvent::VoiceFrame {
+            from_peer_id,
+            is_private,
+            burst_id_hex,
+            sequence,
+            kind,
+            frames,
+            codec,
+            total_data_packets,
+            duration_ms,
+            timestamp_ms,
+        } => {
+            let joined: Vec<u8> = frames.into_iter().flatten().collect();
+            MeshUiEvent {
+                kind: "voice_frame".into(),
+                peer_id: from_peer_id,
+                nickname: burst_id_hex,
+                text: format!("{kind}:{sequence}:{codec}:{total_data_packets}:{duration_ms}"),
+                timestamp_ms,
+                detail: kind,
+                is_private,
+                file_name: String::new(),
+                file_bytes: joined,
+            }
         },
         MeshEvent::DeliveryAck {
             peer_id,
@@ -367,6 +433,21 @@ fn map_event(e: MeshEvent) -> MeshUiEvent {
             detail: "verified".into(),
             is_private: true,
             file_name: String::new(),
+            file_bytes: Vec::new(),
+        },
+        MeshEvent::PrivateMediaLegacy {
+            peer_id,
+            file_name,
+            detail,
+        } => MeshUiEvent {
+            kind: "private_media_legacy".into(),
+            peer_id,
+            nickname: String::new(),
+            text: file_name.clone(),
+            timestamp_ms: 0,
+            detail,
+            is_private: true,
+            file_name,
             file_bytes: Vec::new(),
         },
     }

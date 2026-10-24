@@ -2,6 +2,8 @@
 
 Offline speaks the **BitChat BLE mesh wire protocol** for chat and private sessions, and a separate **optical fountain frame** format for camera/QR file transfer. Internet transports (Nostr / Tor / geohash) are **out of scope**.
 
+**Interop status vs BitChat Android/iOS** (including the private-media “not E2E” warning): see [`BITCHAT_ALIGNMENT.md`](BITCHAT_ALIGNMENT.md).
+
 ## Mesh identity
 
 - Noise static key: X25519
@@ -67,7 +69,7 @@ Canonical v2 encoding (2-byte lengths except CONTENT):
 | `0x03` | MIME type (UTF-8) | u16 |
 | `0x04` | Content bytes | **u32** |
 
-Limits: content ≤ 1 MiB. Mesh **photos** should stay near BitChat’s ~45 KiB target (≤256 BLE fragments — Android rejects longer trains). Voice notes ideally ≤ 512 KiB but AAC keeps them small in practice. Broadcast = no recipient; directed “private” file sets `recipient_id` (signed, not Noise-encrypted — same as BitChat). Noise `privateFile=0x20` payloads reuse the same TLV when received.
+Limits: content ≤ 1 MiB. Mesh **photos** should stay near BitChat’s ~45 KiB target (≤256 BLE fragments — Android rejects longer trains). Voice notes ideally ≤ 512 KiB but AAC keeps them small in practice. Broadcast = no recipient (signed `0x22`). Private media to capable peers uses Noise `0x11` + inner `privateFile=0x20` (same TLV). Legacy directed signed `0x22` is only for older peers after consent.
 
 **Official BitChat compatibility notes:**
 
@@ -76,7 +78,7 @@ Limits: content ≤ 1 MiB. Mesh **photos** should stay near BitChat’s ~45 KiB 
 - Fragment pacing ~25–30 ms (BitChat `bleFragmentSpacingMs`); BitChat’s assembly window is ~30 s, so default chunk **469** is required for large photos.
 - Voice notes: native AAC → `audio/mp4` / `.m4a`; web fallback → `audio/wav`.
 
-Voice notes use the same `fileTransfer` path. Live PTT (`voiceFrame` 0x29) is not implemented yet.
+Voice notes use the same `fileTransfer` path. Live PTT uses public signed `voiceFrame` `0x29` or Noise inner `0x08` (`VoiceBurstPacket`; see BitChat `LIVE_VOICE_V1.md`).
 
 ### Gossip sync (`requestSync`)
 
@@ -116,11 +118,13 @@ After Noise decrypt, first byte is `NoisePayloadType`. For `privateMessage=0x01`
 | `0x00` | Message ID |
 | `0x01` | Content (UTF-8) |
 
-Noise payload type byte (inside decrypted Noise): `privateMessage=0x01`, `readReceipt=0x02`, `delivered=0x03`, `privateFile=0x20`, …
+Noise payload type byte (inside decrypted Noise): `privateMessage=0x01`, `readReceipt=0x02`, `delivered=0x03`, `voiceFrame=0x08`, `privateFile=0x20`, `authenticatedPeerState=0x21`, …
 
-Receivers ack DMs with `delivered` (body = message id UTF-8). Senders may queue private texts and start Noise XX when the session is not ready yet.
+Receivers ack DMs with `delivered` (body = message id UTF-8). Private media uses the same ACK types with a BitChat stable id `media-` + 32 hex (derived from sender, recipient, and receipt-eligible filename). Senders may queue private texts and start Noise XX when the session is not ready yet.
 
-Voice notes use BitChat `fileTransfer` (0x22) with `audio/mp4` AAC when available (`voice_yyyyMMdd_HHmmss_<uuid>.m4a`), or `audio/wav` fallback. Directed private media sets the recipient id and signs the packet (not Noise-wrapped), matching BitChat iOS `sendFilePrivate`.
+**Private media (BitChat private-media v1):** Offline advertises announce TLV `0x05` bits 8+9 (`PRIVATE_MEDIA` + `PRIVATE_MEDIA_RECEIPTS`), exchanges Noise `authenticatedPeerState` `0x21` after each Noise generation, and sends private photos/voice as Noise outer `0x11` + inner `0x20`. Filenames must be BitChat-shaped (`img_…_<UUID>.jpg` / `voice_…`) for receipt ids. Directed signed `fileTransfer` `0x22` is legacy-only (consent required). See [`BITCHAT_ALIGNMENT.md`](BITCHAT_ALIGNMENT.md).
+
+Public / broadcast voice notes use BitChat `fileTransfer` (0x22) with `audio/mp4` AAC when available (`voice_yyyyMMdd_HHmmss_<uuid>.m4a`), or `audio/wav` fallback.
 
 `CompressionUtil` uses **raw DEFLATE** (Apple `COMPRESSION_ZLIB` / Android `Deflater(nowrap)`), not the zlib wrapper. Decode accepts raw DEFLATE and legacy zlib-wrapped payloads. `shouldCompress` counts unique bytes over the **entire** payload and divides by `min(len, 256)` (threshold 100 bytes, ratio &lt; 0.9).
 

@@ -10,9 +10,10 @@ use offline_packet::{
     build_request_sync_payload, compute_packet_id, decode_file_transfer, decode_fragment_id_filter,
     decode_private_message, decode_request_sync, encode_announce_tlv, encode_file_transfer,
     encode_private_message, encode_request_sync, gcs_bucket, gcs_contains, decode_to_sorted_set,
-    maybe_fragment, maybe_fragment_sized, parse_announce_payload, FileTransferPayload,
-    FragmentReassembler, MessageType, NoisePayloadType, Packet, PacketError, PeerId,
-    SyncCandidate, SyncTypeFlags, BITCHAT_COMPAT_MAX_FRAGMENTS, DEFAULT_TTL,
+    maybe_fragment, maybe_fragment_sized, parse_announce_payload, private_media_stable_id,
+    AuthenticatedPeerState, FileTransferPayload, FragmentReassembler, MessageType,
+    NoisePayloadType, Packet, PacketError, PeerCapabilities, PeerId, SyncCandidate,
+    SyncTypeFlags, VoiceBurstPacket, BITCHAT_COMPAT_MAX_FRAGMENTS, DEFAULT_TTL,
     MAX_FILE_PAYLOAD_BYTES,
 };
 use rand::RngCore;
@@ -32,6 +33,15 @@ const SYNC_RESPONSE_WINDOW_MS: u64 = 30_000;
 const INITIAL_SYNC_DELAY_MS: u64 = 5_000;
 const MESSAGE_SYNC_INTERVAL_MS: u64 = 15_000;
 const FILE_SYNC_INTERVAL_MS: u64 = 60_000;
+/// Cap concurrent Noise sessions / tracked peers (S-6). LRU-evict half-open first.
+const MAX_TRACKED_PEERS: usize = 256;
+const MAX_HALF_OPEN_SESSIONS: usize = 32;
+/// Max nested fragment→ingest re-entries (S-3).
+const MAX_FRAGMENT_INGEST_DEPTH: u8 = 2;
+/// BitChat private-media v1: wait this long for Noise `0x21` before legacy fallback.
+const PEER_STATE_WATCHDOG_MS: u64 = 5_000;
+/// Bound deferred private-file intents per peer.
+const MAX_PENDING_PRIVATE_FILES: usize = 4;
 
 #[derive(Debug, Error)]
 pub enum MeshError {
@@ -47,6 +57,11 @@ pub enum MeshError {
     SessionNotReady(String),
     #[error("file transfer rejected: {0}")]
     File(String),
+    /// Directed media would be sent as legacy signed `0x22` (not Noise). Caller may
+    /// re-invoke [`MeshController::queue_file_ex`] with `allow_legacy_private=true`
+    /// after user consent.
+    #[error("legacy private media requires consent for peer {0}")]
+    LegacyPrivateMediaConsent(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +91,54 @@ pub struct MeshPeer {
     pub noise_public_key: Option<Vec<u8>>,
     pub signing_public_key: Option<Vec<u8>>,
     pub noise_state: NoiseLinkState,
+    /// Announce TLV `0x05` discovery hint (not authorization for encrypted media).
+    pub announce_capabilities: u64,
+    /// Proven Noise `0x21` capabilities when authenticated for this generation.
+    pub peer_state_capabilities: Option<u64>,
+}
+
+impl MeshPeer {
+    /// True when authenticated peer-state proves `PRIVATE_MEDIA` (bit 8).
+    pub fn private_media_ready(&self) -> bool {
+        self.peer_state_capabilities
+            .map(|c| PeerCapabilities { raw: c }.contains(PeerCapabilities::PRIVATE_MEDIA))
+            .unwrap_or(false)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PeerStateStatus {
+    /// Sent our `0x21`; waiting for theirs (or echo).
+    Awaiting { since_ms: u64 },
+    /// Received valid `0x21` for this generation.
+    Proven,
+    /// Watchdog expired without a proof (legacy peer).
+    TimedOut,
+}
+
+#[derive(Debug, Clone)]
+struct PeerAuthRecord {
+    status: PeerStateStatus,
+    capabilities: PeerCapabilities,
+    signing_public_key: Option<[u8; 32]>,
+    /// We already echoed our local `0x21` after accepting theirs.
+    echoed: bool,
+}
+
+#[derive(Debug, Clone)]
+struct PendingPrivateFile {
+    file_name: String,
+    mime_type: String,
+    content: Vec<u8>,
+    allow_legacy: bool,
+    queued_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrivateMediaDecision {
+    Encrypted,
+    AwaitingPeerState,
+    Legacy,
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +148,9 @@ pub enum MeshEvent {
         from_peer_id: String,
         text: String,
         timestamp_ms: u64,
+        /// `Some(true)` verified against announced signing key; `Some(false)` failed;
+        /// `None` when no key is known yet (unauthenticated public mesh).
+        signed: Option<bool>,
     },
     PeerLeave { peer_id: String },
     NoiseState {
@@ -99,7 +165,7 @@ pub enum MeshEvent {
         message_id: String,
         is_local: bool,
     },
-    /// BitChat `fileTransfer` (0x22) — photos/files on the mesh.
+    /// BitChat `fileTransfer` (0x22) / Noise private file — photos/files on the mesh.
     FileTransfer {
         from_peer_id: String,
         file_name: String,
@@ -108,18 +174,41 @@ pub enum MeshEvent {
         timestamp_ms: u64,
         is_private: bool,
         is_local: bool,
+        /// BitChat stable private-media id (`media-…`) when receipt-eligible; else empty.
+        message_id: String,
     },
-    /// BitChat Noise `delivered` / `readReceipt` ack for a private message id.
+    /// BitChat Noise `delivered` / `readReceipt` ack for a private message / media id.
     DeliveryAck {
         peer_id: String,
         message_id: String,
         /// `delivered` or `read`.
         kind: String,
     },
+    /// Live PTT voice burst (public `0x29` or Noise inner `0x08`).
+    VoiceFrame {
+        from_peer_id: String,
+        is_private: bool,
+        burst_id_hex: String,
+        sequence: u16,
+        /// `start` | `data` | `end` | `canceled`
+        kind: String,
+        /// AAC access units (data) or empty.
+        frames: Vec<Vec<u8>>,
+        codec: u8,
+        total_data_packets: u16,
+        duration_ms: u32,
+        timestamp_ms: u64,
+    },
     /// QR / Noise verify completed for this peer (BitChat-compatible).
     PeerVerified {
         peer_id: String,
         nickname: String,
+    },
+    /// Directed media was (or will be) sent as legacy signed `0x22` — not Noise E2E.
+    PrivateMediaLegacy {
+        peer_id: String,
+        file_name: String,
+        detail: String,
     },
 }
 
@@ -160,6 +249,10 @@ pub struct MeshController {
     /// BitChat-style: queue private texts until Noise transport is ready.
     /// Entries are `(message_id, text)`.
     pending_private_messages: HashMap<String, VecDeque<(String, String)>>,
+    /// Directed private files waiting for Noise + peer-state (private-media v1).
+    pending_private_files: HashMap<String, VecDeque<PendingPrivateFile>>,
+    /// Per-peer authenticated peer-state (Noise `0x21`) for the current generation.
+    peer_auth: HashMap<String, PeerAuthRecord>,
     /// Ciphertext that arrived before transport was ready (msg3 / race).
     deferred_noise_encrypted: HashMap<String, VecDeque<Packet>>,
     /// Outbound QR verifications awaiting verifyResponse.
@@ -183,7 +276,12 @@ impl MeshController {
             identity,
             nickname,
             router,
-            fragments: FragmentReassembler::new(128),
+            fragments: FragmentReassembler::new(128)
+                .with_max_fragments_per_set(
+                    // Enough headroom for MAX_FILE_PAYLOAD_BYTES at MIN chunk size.
+                    ((MAX_FILE_PAYLOAD_BYTES / 64) + 64).min(u16::MAX as usize) as u16,
+                )
+                .with_max_buffered_bytes(MAX_FILE_PAYLOAD_BYTES.saturating_mul(2) + 256 * 1024),
             peers: HashMap::new(),
             sessions: HashMap::new(),
             outbound: VecDeque::new(),
@@ -200,6 +298,8 @@ impl MeshController {
             last_file_sync_ms: 0,
             last_announce_ms: 0,
             pending_private_messages: HashMap::new(),
+            pending_private_files: HashMap::new(),
+            peer_auth: HashMap::new(),
             deferred_noise_encrypted: HashMap::new(),
             pending_verifications: HashMap::new(),
             verified_peers: HashSet::new(),
@@ -371,6 +471,7 @@ impl MeshController {
             from_peer_id: self.peer_id_hex(),
             text: text.to_string(),
             timestamp_ms: ts,
+            signed: Some(true),
         });
         Ok(())
     }
@@ -383,6 +484,7 @@ impl MeshController {
     /// Periodic / typed sync (BitChat `GossipSyncManager` schedules).
     pub fn maintain_gossip_sync(&mut self) -> Result<(), MeshError> {
         let now = Self::now_ms();
+        self.tick_peer_state_watchdogs();
 
         let due: Vec<String> = self
             .pending_initial_sync
@@ -529,7 +631,16 @@ impl MeshController {
         if let Some(existing) = self.sessions.get(peer_id_hex) {
             if existing.state() == SessionState::Transport {
                 self.set_peer_noise_state(peer_id_hex, NoiseLinkState::Ready, "already ready");
+                let needs_peer_state = match self.peer_auth.get(peer_id_hex).map(|r| r.status) {
+                    Some(PeerStateStatus::Proven)
+                    | Some(PeerStateStatus::Awaiting { .. }) => false,
+                    _ => true,
+                };
+                if needs_peer_state {
+                    self.begin_peer_state_exchange(peer_id_hex);
+                }
                 self.flush_pending_private_messages(peer_id_hex);
+                self.flush_pending_private_files(peer_id_hex);
                 return Ok(());
             }
             if existing.state() == SessionState::Handshaking {
@@ -548,14 +659,31 @@ impl MeshController {
         Ok(())
     }
 
-    /// Queue a BitChat `fileTransfer` (0x22) broadcast, or directed "private" file when
-    /// `to_peer_id_hex` is set. Matches BitChat: signed v2 packet, content not Noise-wrapped.
+    /// Queue a BitChat file transfer.
+    ///
+    /// - Broadcast (`to_peer_id_hex = None`): signed public `fileTransfer` `0x22`.
+    /// - Directed: private-media v1 — Noise `0x11` + inner `0x20` when the peer has
+    ///   proven `PRIVATE_MEDIA`; otherwise legacy directed signed `0x22`.
+    /// - If legacy would be used and `allow_legacy_private` is false, returns
+    ///   [`MeshError::LegacyPrivateMediaConsent`] so the UI can prompt.
     pub fn queue_file(
         &mut self,
         file_name: &str,
         mime_type: &str,
         content: Vec<u8>,
         to_peer_id_hex: Option<&str>,
+    ) -> Result<(), MeshError> {
+        self.queue_file_ex(file_name, mime_type, content, to_peer_id_hex, false)
+    }
+
+    /// Like [`queue_file`], with explicit legacy-private consent.
+    pub fn queue_file_ex(
+        &mut self,
+        file_name: &str,
+        mime_type: &str,
+        content: Vec<u8>,
+        to_peer_id_hex: Option<&str>,
+        allow_legacy_private: bool,
     ) -> Result<(), MeshError> {
         if content.is_empty() {
             return Err(MeshError::File("empty file".into()));
@@ -565,28 +693,76 @@ impl MeshController {
                 "file exceeds {MAX_FILE_PAYLOAD_BYTES} byte limit"
             )));
         }
-        // BitChat rejects broadcast files unless it can verify our Ed25519
-        // signature against the signing key from announce — keep identity fresh
-        // without flooding announce on every photo.
         self.ensure_announce_fresh()?;
 
         let mime = offline_packet::normalize_mime(Some(mime_type), &content);
-        let payload = FileTransferPayload::new(file_name, mime.clone(), content.clone());
-        let encoded = encode_file_transfer(&payload)
-            .ok_or_else(|| MeshError::File("failed to encode file TLV".into()))?;
-
-        let recipient = match to_peer_id_hex {
-            Some(hex) => {
-                Some(PeerId::from_hex(hex).map_err(|e| MeshError::PeerId(e.to_string()))?)
-            }
-            None => None,
+        let Some(to) = to_peer_id_hex else {
+            return self.send_public_file(file_name, &mime, content);
         };
-        if let Some(r) = recipient {
-            if r == self.identity.peer_id() {
-                return Err(MeshError::PeerId("cannot send file to self".into()));
-            }
+
+        let _ = PeerId::from_hex(to).map_err(|e| MeshError::PeerId(e.to_string()))?;
+        if to == self.peer_id_hex() {
+            return Err(MeshError::PeerId("cannot send file to self".into()));
         }
 
+        self.tick_peer_state_watchdogs();
+        let ready = self
+            .sessions
+            .get(to)
+            .map(|s| s.state() == SessionState::Transport)
+            .unwrap_or(false);
+
+        if !ready {
+            self.queue_pending_private_file(
+                to,
+                file_name,
+                &mime,
+                content,
+                allow_legacy_private,
+            );
+            if !self.sessions.contains_key(to) {
+                let _ = self.start_noise_handshake(to);
+            }
+            return Ok(());
+        }
+
+        match self.private_media_send_decision(to) {
+            PrivateMediaDecision::Encrypted => {
+                self.send_noise_private_file(to, file_name, &mime, content)
+            }
+            PrivateMediaDecision::AwaitingPeerState => {
+                self.queue_pending_private_file(
+                    to,
+                    file_name,
+                    &mime,
+                    content,
+                    allow_legacy_private,
+                );
+                Ok(())
+            }
+            PrivateMediaDecision::Legacy => {
+                if !allow_legacy_private {
+                    return Err(MeshError::LegacyPrivateMediaConsent(to.to_string()));
+                }
+                self.events.push_back(MeshEvent::PrivateMediaLegacy {
+                    peer_id: to.to_string(),
+                    file_name: file_name.to_string(),
+                    detail: "directed signed 0x22 (not Noise-wrapped)".into(),
+                });
+                self.send_legacy_directed_file(to, file_name, &mime, content)
+            }
+        }
+    }
+
+    fn send_public_file(
+        &mut self,
+        file_name: &str,
+        mime: &str,
+        content: Vec<u8>,
+    ) -> Result<(), MeshError> {
+        let payload = FileTransferPayload::new(file_name, mime.to_string(), content.clone());
+        let encoded = encode_file_transfer(&payload)
+            .ok_or_else(|| MeshError::File("failed to encode file TLV".into()))?;
         let ts = Self::now_ms();
         let mut pkt = Packet::new(
             MessageType::FileTransfer,
@@ -596,27 +772,338 @@ impl MeshController {
         .with_timestamp(ts)
         .with_ttl(DEFAULT_TTL)
         .with_version(2);
-        if let Some(r) = recipient {
-            pkt = pkt.with_recipient(r);
-        }
         let signing = pkt.signing_bytes()?;
         pkt = pkt.with_signature(self.identity.sign(&signing));
-        if recipient.is_none() {
-            self.remember_gossip_file(&pkt);
-        }
-        self.enqueue_packet(pkt, to_peer_id_hex.map(|s| s.to_string()))?;
-
-        let is_private = recipient.is_some();
+        self.remember_gossip_file(&pkt);
+        self.enqueue_packet(pkt, None)?;
         self.events.push_back(MeshEvent::FileTransfer {
             from_peer_id: self.peer_id_hex(),
             file_name: file_name.to_string(),
-            mime_type: mime,
+            mime_type: mime.to_string(),
             content,
             timestamp_ms: ts,
-            is_private,
+            is_private: false,
             is_local: true,
+            message_id: String::new(),
         });
         Ok(())
+    }
+
+    fn send_legacy_directed_file(
+        &mut self,
+        to: &str,
+        file_name: &str,
+        mime: &str,
+        content: Vec<u8>,
+    ) -> Result<(), MeshError> {
+        let remote = PeerId::from_hex(to).map_err(|e| MeshError::PeerId(e.to_string()))?;
+        let payload = FileTransferPayload::new(file_name, mime.to_string(), content.clone());
+        let encoded = encode_file_transfer(&payload)
+            .ok_or_else(|| MeshError::File("failed to encode file TLV".into()))?;
+        let ts = Self::now_ms();
+        let mut pkt = Packet::new(
+            MessageType::FileTransfer,
+            self.identity.peer_id(),
+            encoded,
+        )
+        .with_timestamp(ts)
+        .with_ttl(DEFAULT_TTL)
+        .with_version(2)
+        .with_recipient(remote);
+        let signing = pkt.signing_bytes()?;
+        pkt = pkt.with_signature(self.identity.sign(&signing));
+        self.enqueue_packet(pkt, Some(to.to_string()))?;
+        self.events.push_back(MeshEvent::FileTransfer {
+            from_peer_id: self.peer_id_hex(),
+            file_name: file_name.to_string(),
+            mime_type: mime.to_string(),
+            content,
+            timestamp_ms: ts,
+            is_private: true,
+            is_local: true,
+            message_id: String::new(),
+        });
+        Ok(())
+    }
+
+    fn send_noise_private_file(
+        &mut self,
+        to: &str,
+        file_name: &str,
+        mime: &str,
+        content: Vec<u8>,
+    ) -> Result<(), MeshError> {
+        let payload = FileTransferPayload::new(file_name, mime.to_string(), content.clone());
+        let encoded = encode_file_transfer(&payload)
+            .ok_or_else(|| MeshError::File("failed to encode file TLV".into()))?;
+        let message_id = private_media_stable_id(&self.peer_id_hex(), to, file_name)
+            .unwrap_or_default();
+        self.queue_noise_payload(to, NoisePayloadType::PrivateFile, &encoded)?;
+        self.events.push_back(MeshEvent::FileTransfer {
+            from_peer_id: self.peer_id_hex(),
+            file_name: file_name.to_string(),
+            mime_type: mime.to_string(),
+            content,
+            timestamp_ms: Self::now_ms(),
+            is_private: true,
+            is_local: true,
+            message_id,
+        });
+        Ok(())
+    }
+
+    /// Queue a live PTT voice burst (public signed `0x29` or Noise `0x08`).
+    pub fn queue_voice_frame(
+        &mut self,
+        burst: VoiceBurstPacket,
+        to_peer_id_hex: Option<&str>,
+    ) -> Result<(), MeshError> {
+        let encoded = burst
+            .encode()
+            .ok_or_else(|| MeshError::File("voice burst encode failed / oversize".into()))?;
+        let Some(to) = to_peer_id_hex else {
+            return self.send_public_voice_frame(burst, encoded);
+        };
+        let _ = PeerId::from_hex(to).map_err(|e| MeshError::PeerId(e.to_string()))?;
+        self.queue_noise_payload(to, NoisePayloadType::VoiceFrame, &encoded)?;
+        self.emit_local_voice_frame(&burst, true);
+        Ok(())
+    }
+
+    fn send_public_voice_frame(
+        &mut self,
+        burst: VoiceBurstPacket,
+        encoded: Vec<u8>,
+    ) -> Result<(), MeshError> {
+        self.ensure_announce_fresh()?;
+        let ts = Self::now_ms();
+        let mut pkt = Packet::new(
+            MessageType::VoiceFrame,
+            self.identity.peer_id(),
+            encoded,
+        )
+        .with_timestamp(ts)
+        .with_ttl(DEFAULT_TTL)
+        .with_version(1);
+        let signing = pkt.signing_bytes()?;
+        pkt = pkt.with_signature(self.identity.sign(&signing));
+        self.enqueue_packet(pkt, None)?;
+        self.emit_local_voice_frame(&burst, false);
+        Ok(())
+    }
+
+    fn emit_local_voice_frame(&mut self, burst: &VoiceBurstPacket, is_private: bool) {
+        let (kind, frames, codec, total, duration) = voice_burst_event_fields(burst);
+        self.events.push_back(MeshEvent::VoiceFrame {
+            from_peer_id: self.peer_id_hex(),
+            is_private,
+            burst_id_hex: hex::encode(burst.burst_id),
+            sequence: burst.sequence,
+            kind,
+            frames,
+            codec,
+            total_data_packets: total,
+            duration_ms: duration,
+            timestamp_ms: Self::now_ms(),
+        });
+    }
+
+    fn queue_pending_private_file(
+        &mut self,
+        to: &str,
+        file_name: &str,
+        mime: &str,
+        content: Vec<u8>,
+        allow_legacy: bool,
+    ) {
+        let q = self
+            .pending_private_files
+            .entry(to.to_string())
+            .or_default();
+        while q.len() >= MAX_PENDING_PRIVATE_FILES {
+            q.pop_front();
+        }
+        q.push_back(PendingPrivateFile {
+            file_name: file_name.to_string(),
+            mime_type: mime.to_string(),
+            content,
+            allow_legacy,
+            queued_ms: Self::now_ms(),
+        });
+    }
+
+    fn private_media_send_decision(&self, peer_id: &str) -> PrivateMediaDecision {
+        match self.peer_auth.get(peer_id).map(|r| r.status) {
+            Some(PeerStateStatus::Proven) => {
+                if self
+                    .peer_auth
+                    .get(peer_id)
+                    .map(|r| r.capabilities.contains(PeerCapabilities::PRIVATE_MEDIA))
+                    .unwrap_or(false)
+                {
+                    PrivateMediaDecision::Encrypted
+                } else {
+                    PrivateMediaDecision::Legacy
+                }
+            }
+            Some(PeerStateStatus::Awaiting { since_ms }) => {
+                let now = Self::now_ms();
+                if now.saturating_sub(since_ms) >= PEER_STATE_WATCHDOG_MS {
+                    PrivateMediaDecision::Legacy
+                } else {
+                    PrivateMediaDecision::AwaitingPeerState
+                }
+            }
+            Some(PeerStateStatus::TimedOut) | None => PrivateMediaDecision::Legacy,
+        }
+    }
+
+    fn begin_peer_state_exchange(&mut self, peer_id: &str) {
+        let now = Self::now_ms();
+        self.peer_auth.insert(
+            peer_id.to_string(),
+            PeerAuthRecord {
+                status: PeerStateStatus::Awaiting { since_ms: now },
+                capabilities: PeerCapabilities::NONE,
+                signing_public_key: None,
+                echoed: false,
+            },
+        );
+        if let Some(p) = self.peers.get_mut(peer_id) {
+            p.peer_state_capabilities = None;
+        }
+        let _ = self.send_local_peer_state(peer_id);
+    }
+
+    fn local_peer_state(&self) -> AuthenticatedPeerState {
+        AuthenticatedPeerState::new(
+            PeerCapabilities::LOCAL_SUPPORTED,
+            *self.identity.signing_public_key(),
+        )
+    }
+
+    fn send_local_peer_state(&mut self, peer_id: &str) -> Result<(), MeshError> {
+        let body = self.local_peer_state().encode();
+        self.queue_noise_payload(peer_id, NoisePayloadType::AuthenticatedPeerState, &body)
+    }
+
+    fn accept_peer_state(&mut self, from: &str, state: AuthenticatedPeerState) {
+        let now = Self::now_ms();
+        let mut should_echo = false;
+        {
+            let entry = self.peer_auth.entry(from.to_string()).or_insert_with(|| {
+                PeerAuthRecord {
+                    status: PeerStateStatus::Awaiting { since_ms: now },
+                    capabilities: PeerCapabilities::NONE,
+                    signing_public_key: None,
+                    echoed: false,
+                }
+            });
+            match entry.status {
+                PeerStateStatus::Proven => {
+                    // Idempotent identical proof; reject conflicting second proof.
+                    if entry.capabilities != state.capabilities
+                        || entry.signing_public_key != Some(state.signing_public_key)
+                    {
+                        return;
+                    }
+                }
+                _ => {
+                    entry.status = PeerStateStatus::Proven;
+                    entry.capabilities = state.capabilities;
+                    entry.signing_public_key = Some(state.signing_public_key);
+                    if !entry.echoed {
+                        entry.echoed = true;
+                        should_echo = true;
+                    }
+                }
+            }
+        }
+        if let Some(p) = self.peers.get_mut(from) {
+            p.peer_state_capabilities = Some(state.capabilities.raw);
+            p.signing_public_key = Some(state.signing_public_key.to_vec());
+        }
+        if should_echo {
+            let _ = self.send_local_peer_state(from);
+        }
+        self.flush_pending_private_files(from);
+    }
+
+    fn tick_peer_state_watchdogs(&mut self) {
+        let now = Self::now_ms();
+        let mut timed_out = Vec::new();
+        for (peer, rec) in &mut self.peer_auth {
+            if let PeerStateStatus::Awaiting { since_ms } = rec.status {
+                if now.saturating_sub(since_ms) >= PEER_STATE_WATCHDOG_MS {
+                    rec.status = PeerStateStatus::TimedOut;
+                    timed_out.push(peer.clone());
+                }
+            }
+        }
+        for peer in timed_out {
+            self.flush_pending_private_files(&peer);
+        }
+    }
+
+    fn flush_pending_private_files(&mut self, peer_id: &str) {
+        self.tick_peer_state_watchdogs();
+        let Some(mut q) = self.pending_private_files.remove(peer_id) else {
+            return;
+        };
+        let mut requeue = VecDeque::new();
+        while let Some(item) = q.pop_front() {
+            // Drop intents older than 15s (BitChat-style).
+            if Self::now_ms().saturating_sub(item.queued_ms) > 15_000 {
+                continue;
+            }
+            match self.private_media_send_decision(peer_id) {
+                PrivateMediaDecision::AwaitingPeerState => {
+                    requeue.push_back(item);
+                }
+                PrivateMediaDecision::Encrypted => {
+                    let _ = self.send_noise_private_file(
+                        peer_id,
+                        &item.file_name,
+                        &item.mime_type,
+                        item.content,
+                    );
+                }
+                PrivateMediaDecision::Legacy => {
+                    if item.allow_legacy {
+                        self.events.push_back(MeshEvent::PrivateMediaLegacy {
+                            peer_id: peer_id.to_string(),
+                            file_name: item.file_name.clone(),
+                            detail: "directed signed 0x22 (not Noise-wrapped)".into(),
+                        });
+                        let _ = self.send_legacy_directed_file(
+                            peer_id,
+                            &item.file_name,
+                            &item.mime_type,
+                            item.content,
+                        );
+                    } else {
+                        self.events.push_back(MeshEvent::PrivateMediaLegacy {
+                            peer_id: peer_id.to_string(),
+                            file_name: item.file_name.clone(),
+                            detail: "needs_consent".into(),
+                        });
+                    }
+                }
+            }
+        }
+        if !requeue.is_empty() {
+            self.pending_private_files
+                .entry(peer_id.to_string())
+                .or_default()
+                .extend(requeue);
+        }
+    }
+
+    fn clear_peer_auth_generation(&mut self, peer_id: &str) {
+        self.peer_auth.remove(peer_id);
+        if let Some(p) = self.peers.get_mut(peer_id) {
+            p.peer_state_capabilities = None;
+        }
     }
 
     /// Encrypt and queue a BitChat private message. If Noise is not ready yet,
@@ -676,6 +1163,22 @@ impl MeshController {
             is_local: true,
         });
         Ok(())
+    }
+
+    /// BitChat Noise `readReceipt` (0x02) — body is the private message id UTF-8.
+    pub fn queue_read_receipt(
+        &mut self,
+        peer_id_hex: &str,
+        message_id: &str,
+    ) -> Result<(), MeshError> {
+        if message_id.is_empty() {
+            return Err(MeshError::Noise("empty read receipt id".into()));
+        }
+        self.queue_noise_payload(
+            peer_id_hex,
+            NoisePayloadType::ReadReceipt,
+            message_id.as_bytes(),
+        )
     }
 
     fn encrypt_and_send_private(
@@ -817,10 +1320,11 @@ impl MeshController {
         }
         // BitChat Android rejects fragment trains above 256 (private media v1
         // contract). Refuse oversized mesh media instead of sending a train
-        // that peers will never reassemble.
-        if packet.packet_type == MessageType::FileTransfer as u8
-            && frames.len() > BITCHAT_COMPAT_MAX_FRAGMENTS
-        {
+        // that peers will never reassemble. Noise private files also fragment
+        // as outer type 0x11 after encryption.
+        let media_like = packet.packet_type == MessageType::FileTransfer as u8
+            || packet.packet_type == MessageType::NoiseEncrypted as u8;
+        if media_like && frames.len() > BITCHAT_COMPAT_MAX_FRAGMENTS {
             return Err(MeshError::File(format!(
                 "file needs {} fragments (BitChat limit {BITCHAT_COMPAT_MAX_FRAGMENTS}); shrink the photo/voice note",
                 frames.len()
@@ -850,17 +1354,28 @@ impl MeshController {
     /// BitChat drops bad frames silently; surfacing every decode glitch as
     /// `ingest error` hid real fileTransfer failures and broke the UI mid-transfer.
     pub fn ingest_frame(&mut self, bytes: &[u8]) -> Result<Vec<OutboundFrame>, MeshError> {
+        self.ingest_frame_depth(bytes, 0)
+    }
+
+    fn ingest_frame_depth(
+        &mut self,
+        bytes: &[u8],
+        depth: u8,
+    ) -> Result<Vec<OutboundFrame>, MeshError> {
         let packet = match Packet::decode(bytes) {
             Ok(p) => p,
             Err(_) => return Ok(Vec::new()),
         };
 
         if packet.packet_type == MessageType::Fragment as u8 {
+            if depth >= MAX_FRAGMENT_INGEST_DEPTH {
+                return Ok(Vec::new());
+            }
             if Self::is_broadcast_packet(&packet) {
                 self.remember_gossip_fragment(&packet);
             }
             match self.fragments.ingest(&packet) {
-                Some(assembled) => match self.ingest_frame(&assembled) {
+                Some(assembled) => match self.ingest_frame_depth(&assembled, depth + 1) {
                     Ok(frames) => return Ok(frames),
                     // Reassembled bytes that still fail decode (e.g. lost chunk
                     // corruption) — drop like BitChat, don't poison the session.
@@ -878,12 +1393,20 @@ impl MeshController {
             return Ok(Vec::new());
         }
 
-        if decision != RelayDecision::Drop || is_announce {
+        // Live PTT: reject before relay (BitChat LIVE_VOICE_V1).
+        let is_voice = packet.packet_type == MessageType::VoiceFrame as u8;
+        let voice_ok = if is_voice {
+            self.public_voice_acceptable(&packet)
+        } else {
+            true
+        };
+
+        if (decision != RelayDecision::Drop || is_announce) && (!is_voice || voice_ok) {
             self.handle_local(&packet)?;
         }
 
         match decision {
-            RelayDecision::Relay { new_ttl } => {
+            RelayDecision::Relay { new_ttl } if voice_ok => {
                 let mut relay = packet.clone();
                 relay.ttl = new_ttl;
                 // Native BLE notifies can exceed Web Bluetooth's 512-byte write
@@ -894,7 +1417,7 @@ impl MeshController {
                     Err(_) => Ok(Vec::new()),
                 }
             }
-            RelayDecision::LocalOnly | RelayDecision::Drop => Ok(Vec::new()),
+            _ => Ok(Vec::new()),
         }
     }
 
@@ -927,13 +1450,28 @@ impl MeshController {
                 self.handle_announce(packet, &from, now);
             }
             Some(MessageType::Message) => {
+                // A-8: private text is Noise-only. Directed plaintext `0x02` must not
+                // appear as public chat (and never as a DM).
+                let is_directed = packet
+                    .recipient_id
+                    .map(|r| !r.is_broadcast())
+                    .unwrap_or(false);
+                if is_directed {
+                    return Ok(());
+                }
                 let text = String::from_utf8_lossy(&packet.payload).to_string();
+                let signed = self.signature_status(packet, &from);
+                // When we know the peer's signing key, drop forged public chat (S-9).
+                if signed == Some(false) {
+                    return Ok(());
+                }
                 self.touch_peer(&from, now, None, None, None);
                 self.remember_gossip_message(packet);
                 self.events.push_back(MeshEvent::PublicMessage {
                     from_peer_id: from,
                     text,
                     timestamp_ms: packet.timestamp,
+                    signed,
                 });
             }
             Some(MessageType::RequestSync) if for_us => {
@@ -942,9 +1480,27 @@ impl MeshController {
             Some(MessageType::FileTransfer) => {
                 self.handle_file_transfer(packet, &from, now, for_us);
             }
+            Some(MessageType::VoiceFrame) => {
+                self.handle_public_voice_frame(packet, &from, now);
+            }
             Some(MessageType::Leave) => {
-                self.peers.remove(&from);
+                // Do not tear down an established Noise session on a spoofable
+                // unauthenticated Leave (S-8). Only honor Leave when there is
+                // no transport session (or none at all).
+                let has_transport = self
+                    .sessions
+                    .get(&from)
+                    .map(|s| s.state() == SessionState::Transport)
+                    .unwrap_or(false);
+                if has_transport {
+                    return Ok(());
+                }
                 self.sessions.remove(&from);
+                self.peers.remove(&from);
+                self.deferred_noise_encrypted.remove(&from);
+                self.pending_private_messages.remove(&from);
+                self.pending_private_files.remove(&from);
+                self.clear_peer_auth_generation(&from);
                 self.events.push_back(MeshEvent::PeerLeave { peer_id: from });
             }
             Some(MessageType::NoiseHandshake) if for_us => {
@@ -956,6 +1512,47 @@ impl MeshController {
             _ => {}
         }
         Ok(())
+    }
+
+    fn public_voice_acceptable(&self, packet: &Packet) -> bool {
+        let from = packet.sender_id.to_hex();
+        let is_broadcast = packet
+            .recipient_id
+            .map(|r| r.is_broadcast())
+            .unwrap_or(true);
+        if !is_broadcast {
+            return false;
+        }
+        if self.signature_status(packet, &from) != Some(true) {
+            return false;
+        }
+        if Self::now_ms().abs_diff(packet.timestamp) > 30_000 {
+            return false;
+        }
+        VoiceBurstPacket::decode(&packet.payload).is_some()
+    }
+
+    fn handle_public_voice_frame(&mut self, packet: &Packet, from: &str, now: u64) {
+        if !self.public_voice_acceptable(packet) {
+            return;
+        }
+        let Some(burst) = VoiceBurstPacket::decode(&packet.payload) else {
+            return;
+        };
+        self.touch_peer(from, now, None, None, None);
+        let (kind, frames, codec, total, duration) = voice_burst_event_fields(&burst);
+        self.events.push_back(MeshEvent::VoiceFrame {
+            from_peer_id: from.to_string(),
+            is_private: false,
+            burst_id_hex: hex::encode(burst.burst_id),
+            sequence: burst.sequence,
+            kind,
+            frames,
+            codec,
+            total_data_packets: total,
+            duration_ms: duration,
+            timestamp_ms: packet.timestamp,
+        });
     }
 
     fn handle_file_transfer(
@@ -975,25 +1572,15 @@ impl MeshController {
         let Some(file) = decode_file_transfer(&packet.payload) else {
             return;
         };
-        // Prefer verifying broadcast signatures when we know the peer's signing key
-        // (BitChat requires this for broadcast media).
-        if !is_directed {
-            if let (Some(sig), Some(peer)) = (packet.signature, self.peers.get(from)) {
-                if let Some(spk) = peer.signing_public_key.as_ref() {
-                    if spk.len() == 32 {
-                        let mut key = [0u8; 32];
-                        key.copy_from_slice(spk);
-                        if let Ok(signing_bytes) = packet.signing_bytes() {
-                            if Identity::verify(&key, &signing_bytes, &sig).is_err() {
-                                return;
-                            }
-                        }
-                    }
-                }
-            } else if packet.signature.is_none() {
-                // BitChat drops unsigned broadcasts; mirror that once we care about spoofing.
+        // Prefer verifying signatures when we know the peer's signing key
+        // (BitChat requires this for broadcast media; apply to directed too — S-9).
+        match self.signature_status(packet, from) {
+            Some(false) => return,
+            None if !is_directed && packet.signature.is_none() => {
+                // BitChat drops unsigned broadcasts.
                 return;
             }
+            _ => {}
         }
         let mime = file
             .mime_type
@@ -1019,6 +1606,7 @@ impl MeshController {
             timestamp_ms: packet.timestamp,
             is_private: is_directed,
             is_local: false,
+            message_id: String::new(),
         });
     }
 
@@ -1095,7 +1683,11 @@ impl MeshController {
         let nick_changed = existing
             .map(|p| p.nickname != nickname)
             .unwrap_or(true);
+        let caps = parsed.capabilities.raw;
         self.touch_peer(from, now, Some(nickname.clone()), noise_key, signing_key);
+        if let Some(p) = self.peers.get_mut(from) {
+            p.announce_capabilities = caps;
+        }
         self.remember_gossip_announce(packet);
         if nick_changed {
             self.events.push_back(MeshEvent::PeerAnnounce {
@@ -1332,19 +1924,26 @@ impl MeshController {
                     }
                     // Yield: drop our initiator and accept their initiation as responder.
                     self.sessions.remove(from);
+                    self.clear_peer_auth_generation(from);
                 } else if existing.state() == SessionState::Transport {
                     // Peer restarted — accept a new handshake.
                     self.sessions.remove(from);
+                    self.clear_peer_auth_generation(from);
                 } else if existing.state() == SessionState::Handshaking
                     && existing.role() == HandshakeRole::Responder
                 {
                     // Fresh msg1 while we are already responding — reset responder.
                     self.sessions.remove(from);
+                    self.clear_peer_auth_generation(from);
                 }
             }
         }
 
         if !self.sessions.contains_key(from) {
+            // Cap half-open handshakes keyed by spoofable sender ids (S-6).
+            while self.half_open_session_count() >= MAX_HALF_OPEN_SESSIONS {
+                self.evict_oldest_half_open_session();
+            }
             match NoiseSession::start(&self.identity, HandshakeRole::Responder, remote) {
                 Ok(session) => {
                     self.sessions.insert(from.to_string(), session);
@@ -1378,6 +1977,7 @@ impl MeshController {
         if let Some(detail) = fail_detail {
             self.sessions.remove(from);
             self.deferred_noise_encrypted.remove(from);
+            self.clear_peer_auth_generation(from);
             self.set_peer_noise_state(from, NoiseLinkState::Failed, &detail);
             return Ok(());
         }
@@ -1399,9 +1999,11 @@ impl MeshController {
 
         if became_ready {
             self.set_peer_noise_state(from, NoiseLinkState::Ready, "transport ready");
+            self.begin_peer_state_exchange(from);
             self.flush_pending_private_messages(from);
             let _ = self.send_pending_verify_challenge(from);
             self.drain_deferred_noise_encrypted(from)?;
+            self.flush_pending_private_files(from);
         }
         Ok(())
     }
@@ -1490,18 +2092,56 @@ impl MeshController {
                 if !mime_magic_ok(&mime, &file.content) {
                     return Ok(());
                 }
+                let file_name = file
+                    .file_name
+                    .unwrap_or_else(|| default_file_name_for_mime(&mime));
+                // Commit BitChat stable id before UI + ACK (PRIVATE_MEDIA_RECEIPTS).
+                let message_id =
+                    private_media_stable_id(from, &self.peer_id_hex(), &file_name)
+                        .unwrap_or_default();
                 self.touch_peer(from, Self::now_ms(), None, None, None);
                 self.events.push_back(MeshEvent::FileTransfer {
                     from_peer_id: from.to_string(),
-                    file_name: file
-                        .file_name
-                        .unwrap_or_else(|| default_file_name_for_mime(&mime)),
+                    file_name,
                     mime_type: mime,
                     content: file.content,
                     timestamp_ms: packet.timestamp,
                     is_private: true,
                     is_local: false,
+                    message_id: message_id.clone(),
                 });
+                if !message_id.is_empty() {
+                    let _ = self.queue_noise_payload(
+                        from,
+                        NoisePayloadType::Delivered,
+                        message_id.as_bytes(),
+                    );
+                }
+            }
+            Some(NoisePayloadType::VoiceFrame) => {
+                let Some(burst) = VoiceBurstPacket::decode(body) else {
+                    return Ok(());
+                };
+                self.touch_peer(from, Self::now_ms(), None, None, None);
+                let (kind, frames, codec, total, duration) = voice_burst_event_fields(&burst);
+                self.events.push_back(MeshEvent::VoiceFrame {
+                    from_peer_id: from.to_string(),
+                    is_private: true,
+                    burst_id_hex: hex::encode(burst.burst_id),
+                    sequence: burst.sequence,
+                    kind,
+                    frames,
+                    codec,
+                    total_data_packets: total,
+                    duration_ms: duration,
+                    timestamp_ms: packet.timestamp,
+                });
+            }
+            Some(NoisePayloadType::AuthenticatedPeerState) => {
+                let Some(state) = AuthenticatedPeerState::decode(body) else {
+                    return Ok(());
+                };
+                self.accept_peer_state(from, state);
             }
             Some(NoisePayloadType::Delivered) => {
                 let message_id = String::from_utf8_lossy(body).to_string();
@@ -1574,6 +2214,22 @@ impl MeshController {
         Ok(())
     }
 
+    /// `Some(true)` / `Some(false)` when the peer's signing key is known; `None` otherwise.
+    fn signature_status(&self, packet: &Packet, from: &str) -> Option<bool> {
+        let peer = self.peers.get(from)?;
+        let spk = peer.signing_public_key.as_ref()?;
+        if spk.len() != 32 {
+            return None;
+        }
+        let mut key = [0u8; 32];
+        key.copy_from_slice(spk);
+        let sig = packet.signature?;
+        let Ok(signing_bytes) = packet.signing_bytes() else {
+            return Some(false);
+        };
+        Some(Identity::verify(&key, &signing_bytes, &sig).is_ok())
+    }
+
     fn touch_peer(
         &mut self,
         peer_id: &str,
@@ -1582,6 +2238,10 @@ impl MeshController {
         noise_public_key: Option<Vec<u8>>,
         signing_public_key: Option<Vec<u8>>,
     ) {
+        let is_new = !self.peers.contains_key(peer_id);
+        if is_new {
+            self.evict_peers_if_needed(now);
+        }
         let entry = self.peers.entry(peer_id.to_string()).or_insert_with(|| MeshPeer {
             peer_id: peer_id.to_string(),
             nickname: peer_id.to_string(),
@@ -1589,6 +2249,8 @@ impl MeshController {
             noise_public_key: None,
             signing_public_key: None,
             noise_state: NoiseLinkState::None,
+            announce_capabilities: 0,
+            peer_state_capabilities: None,
         });
         entry.last_seen_ms = now;
         if let Some(n) = nickname {
@@ -1600,11 +2262,76 @@ impl MeshController {
         if let Some(k) = signing_public_key {
             entry.signing_public_key = Some(k);
         }
+        if let Some(auth) = self.peer_auth.get(peer_id) {
+            if matches!(auth.status, PeerStateStatus::Proven) {
+                entry.peer_state_capabilities = Some(auth.capabilities.raw);
+            }
+        }
         if let Some(session) = self.sessions.get(peer_id) {
             entry.noise_state = match session.state() {
                 SessionState::Transport => NoiseLinkState::Ready,
                 SessionState::Handshaking => NoiseLinkState::Handshaking,
             };
+        }
+    }
+
+    /// Drop least-recently-seen peers (and their half-open sessions) past the cap (S-6).
+    fn evict_peers_if_needed(&mut self, _now: u64) {
+        while self.peers.len() >= MAX_TRACKED_PEERS {
+            let victim = self
+                .peers
+                .iter()
+                .filter(|(id, _)| {
+                    self.sessions
+                        .get(id.as_str())
+                        .map(|s| s.state() != SessionState::Transport)
+                        .unwrap_or(true)
+                })
+                .min_by_key(|(_, p)| p.last_seen_ms)
+                .map(|(id, _)| id.clone())
+                .or_else(|| {
+                    self.peers
+                        .iter()
+                        .min_by_key(|(_, p)| p.last_seen_ms)
+                        .map(|(id, _)| id.clone())
+                });
+            let Some(id) = victim else {
+                break;
+            };
+            self.peers.remove(&id);
+            self.sessions.remove(&id);
+            self.deferred_noise_encrypted.remove(&id);
+            self.pending_private_messages.remove(&id);
+            self.pending_private_files.remove(&id);
+            self.clear_peer_auth_generation(&id);
+            self.pending_initial_sync.remove(&id);
+        }
+    }
+
+    fn half_open_session_count(&self) -> usize {
+        self.sessions
+            .values()
+            .filter(|s| s.state() == SessionState::Handshaking)
+            .count()
+    }
+
+    fn evict_oldest_half_open_session(&mut self) {
+        let victim = self
+            .sessions
+            .iter()
+            .filter(|(_, s)| s.state() == SessionState::Handshaking)
+            .min_by_key(|(id, _)| {
+                self.peers
+                    .get(id.as_str())
+                    .map(|p| p.last_seen_ms)
+                    .unwrap_or(0)
+            })
+            .map(|(id, _)| id.clone());
+        if let Some(id) = victim {
+            self.sessions.remove(&id);
+            self.deferred_noise_encrypted.remove(&id);
+            self.clear_peer_auth_generation(&id);
+            self.set_peer_noise_state(&id, NoiseLinkState::Failed, "half-open session evicted");
         }
     }
 
@@ -1622,6 +2349,32 @@ impl MeshController {
 
     pub fn peer_id_bytes(&self) -> [u8; 8] {
         *self.identity.peer_id().as_bytes()
+    }
+}
+
+fn voice_burst_event_fields(
+    burst: &VoiceBurstPacket,
+) -> (String, Vec<Vec<u8>>, u8, u16, u32) {
+    match &burst.payload {
+        offline_packet::VoiceBurstPayload::Start { codec } => {
+            ("start".into(), Vec::new(), *codec, 0, 0)
+        }
+        offline_packet::VoiceBurstPayload::Data { frames } => {
+            ("data".into(), frames.clone(), 0, 0, 0)
+        }
+        offline_packet::VoiceBurstPayload::End {
+            total_data_packets,
+            duration_ms,
+        } => (
+            "end".into(),
+            Vec::new(),
+            0,
+            *total_data_packets,
+            *duration_ms,
+        ),
+        offline_packet::VoiceBurstPayload::Canceled => {
+            ("canceled".into(), Vec::new(), 0, 0, 0)
+        }
     }
 }
 
@@ -1781,6 +2534,28 @@ mod tests {
             e,
             MeshEvent::DeliveryAck { kind, .. } if kind == "delivered"
         )));
+
+        let message_id = ack
+            .iter()
+            .find_map(|e| match e {
+                MeshEvent::DeliveryAck {
+                    kind,
+                    message_id,
+                    ..
+                } if kind == "delivered" => Some(message_id.clone()),
+                _ => None,
+            })
+            .expect("delivered ack id");
+        b.queue_read_receipt(&a.peer_id_hex(), &message_id).unwrap();
+        for f in b.drain_outbound() {
+            let _ = a.ingest_frame(&f.bytes).unwrap();
+        }
+        let read_ack = a.drain_events();
+        assert!(read_ack.iter().any(|e| matches!(
+            e,
+            MeshEvent::DeliveryAck { kind, message_id: mid, .. }
+                if kind == "read" && mid == &message_id
+        )));
     }
 
     #[test]
@@ -1845,8 +2620,75 @@ mod tests {
         )));
     }
 
+    fn exchange_frames(a: &mut MeshController, b: &mut MeshController, rounds: usize) {
+        for _ in 0..rounds {
+            let a_out = a.drain_outbound();
+            for f in a_out {
+                let relay = b.ingest_frame(&f.bytes).unwrap();
+                for r in relay {
+                    let _ = a.ingest_frame(&r.bytes).unwrap();
+                }
+            }
+            let b_out = b.drain_outbound();
+            for f in b_out {
+                let relay = a.ingest_frame(&f.bytes).unwrap();
+                for r in relay {
+                    let _ = b.ingest_frame(&r.bytes).unwrap();
+                }
+            }
+        }
+    }
+
+    fn announce_and_noise(a: &mut MeshController, b: &mut MeshController) {
+        a.set_link_count(1);
+        b.set_link_count(1);
+        a.queue_announce().unwrap();
+        b.queue_announce().unwrap();
+        exchange_frames(a, b, 2);
+        let _ = a.drain_events();
+        let _ = b.drain_events();
+        let bob = b.peer_id_hex();
+        a.start_noise_handshake(&bob).unwrap();
+        for _ in 0..10 {
+            exchange_frames(a, b, 1);
+            if a.noise_state(&bob) == NoiseLinkState::Ready
+                && b.noise_state(&a.peer_id_hex()) == NoiseLinkState::Ready
+            {
+                break;
+            }
+        }
+        assert_eq!(a.noise_state(&bob), NoiseLinkState::Ready);
+        assert_eq!(b.noise_state(&a.peer_id_hex()), NoiseLinkState::Ready);
+        // Exchange authenticated peer-state (0x21) until both prove PRIVATE_MEDIA.
+        for _ in 0..8 {
+            exchange_frames(a, b, 1);
+            let a_ready = a
+                .peers()
+                .iter()
+                .find(|p| p.peer_id == bob)
+                .map(|p| p.private_media_ready())
+                .unwrap_or(false);
+            let b_ready = b
+                .peers()
+                .iter()
+                .find(|p| p.peer_id == a.peer_id_hex())
+                .map(|p| p.private_media_ready())
+                .unwrap_or(false);
+            if a_ready && b_ready {
+                break;
+            }
+        }
+        let a_ready = a
+            .peers()
+            .iter()
+            .find(|p| p.peer_id == bob)
+            .map(|p| p.private_media_ready())
+            .unwrap_or(false);
+        assert!(a_ready, "alice should see bob private_media_ready");
+    }
+
     #[test]
-    fn file_transfer_broadcast_and_directed() {
+    fn file_transfer_broadcast_and_noise_private() {
         let mut a = MeshController::new(Identity::generate(), "alice".into());
         let mut b = MeshController::new(Identity::generate(), "bob".into());
         a.set_link_count(1);
@@ -1857,6 +2699,13 @@ mod tests {
             let _ = b.ingest_frame(&f.bytes).unwrap();
         }
         let _ = b.drain_events();
+        let alice_peer = b.peers().into_iter().find(|p| p.nickname == "alice").unwrap();
+        assert!(
+            PeerCapabilities {
+                raw: alice_peer.announce_capabilities
+            }
+            .contains(PeerCapabilities::PRIVATE_MEDIA)
+        );
 
         let jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3, 4, 5];
         a.queue_file("pic.jpg", "image/jpeg", jpeg.clone(), None)
@@ -1878,16 +2727,85 @@ mod tests {
             } if file_name == "pic.jpg" && mime_type == "image/jpeg" && content == &jpeg
         )));
 
+        // Private media v1: Noise 0x11 + inner 0x20 after peer-state + receipts.
+        let mut a = MeshController::new(Identity::generate(), "alice".into());
+        let mut b = MeshController::new(Identity::generate(), "bob".into());
+        announce_and_noise(&mut a, &mut b);
         let bob = b.peer_id_hex();
+        let jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3, 4, 5];
+        let name = "img_20261024_120000_550e8400-e29b-41d4-a716-446655440000.jpg";
+        a.queue_file(name, "image/jpeg", jpeg.clone(), Some(&bob))
+            .unwrap();
+        let local = a.drain_events();
+        let local_id = local.iter().find_map(|e| match e {
+            MeshEvent::FileTransfer {
+                message_id,
+                is_local: true,
+                ..
+            } if !message_id.is_empty() => Some(message_id.clone()),
+            _ => None,
+        });
+        assert!(local_id.is_some(), "sender must emit stable media id");
+        exchange_frames(&mut a, &mut b, 4);
+        let ev = b.drain_events();
+        assert!(ev.iter().any(|e| matches!(
+            e,
+            MeshEvent::FileTransfer {
+                file_name,
+                content,
+                is_private: true,
+                is_local: false,
+                message_id,
+                ..
+            } if file_name == name && content == &jpeg && message_id == local_id.as_ref().unwrap()
+        )));
+        // Receiver must ACK with the same stable id so the sender sees delivered.
+        exchange_frames(&mut a, &mut b, 4);
+        let ack = a.drain_events();
+        let mid = local_id.unwrap();
+        assert!(ack.iter().any(|e| matches!(
+            e,
+            MeshEvent::DeliveryAck { kind, message_id, .. }
+                if kind == "delivered" && message_id == &mid
+        )));
+    }
+
+    #[test]
+    fn legacy_private_media_requires_consent() {
+        let mut a = MeshController::new(Identity::generate(), "alice".into());
+        let mut b = MeshController::new(Identity::generate(), "bob".into());
+        announce_and_noise(&mut a, &mut b);
+        let bob = b.peer_id_hex();
+        // Simulate older peer: proven without PRIVATE_MEDIA.
+        a.peer_auth.insert(
+            bob.clone(),
+            PeerAuthRecord {
+                status: PeerStateStatus::Proven,
+                capabilities: PeerCapabilities::NONE,
+                signing_public_key: None,
+                echoed: true,
+            },
+        );
+        if let Some(p) = a.peers.get_mut(&bob) {
+            p.peer_state_capabilities = Some(0);
+        }
+
         let png = vec![
             0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4,
         ];
-        a.queue_file("secret.png", "image/png", png, Some(&bob))
+        let err = a
+            .queue_file("secret.png", "image/png", png.clone(), Some(&bob))
+            .unwrap_err();
+        assert!(matches!(err, MeshError::LegacyPrivateMediaConsent(_)));
+
+        a.queue_file_ex("secret.png", "image/png", png.clone(), Some(&bob), true)
             .unwrap();
-        let _ = a.drain_events();
-        for f in a.drain_outbound() {
-            let _ = b.ingest_frame(&f.bytes).unwrap();
-        }
+        let local = a.drain_events();
+        assert!(local.iter().any(|e| matches!(
+            e,
+            MeshEvent::PrivateMediaLegacy { file_name, .. } if file_name == "secret.png"
+        )));
+        exchange_frames(&mut a, &mut b, 4);
         let ev = b.drain_events();
         assert!(ev.iter().any(|e| matches!(
             e,
@@ -1898,6 +2816,38 @@ mod tests {
                 ..
             } if file_name == "secret.png"
         )));
+    }
+
+    #[test]
+    fn directed_plaintext_message_is_ignored() {
+        let mut a = MeshController::new(Identity::generate(), "alice".into());
+        let mut b = MeshController::new(Identity::generate(), "bob".into());
+        a.set_link_count(1);
+        b.set_link_count(1);
+        a.queue_announce().unwrap();
+        b.queue_announce().unwrap();
+        exchange_frames(&mut a, &mut b, 2);
+        let _ = a.drain_events();
+        let _ = b.drain_events();
+
+        let sender = PeerId::from_hex(&a.peer_id_hex()).unwrap();
+        let remote = PeerId::from_hex(&b.peer_id_hex()).unwrap();
+        let pkt = Packet::new(
+            MessageType::Message,
+            sender,
+            b"spoofed dm".to_vec(),
+        )
+        .with_timestamp(MeshController::now_ms())
+        .with_ttl(DEFAULT_TTL)
+        .with_recipient(remote);
+        let bytes = pkt.encode(false).unwrap();
+        let _ = b.ingest_frame(&bytes).unwrap();
+        let ev = b.drain_events();
+        assert!(!ev.iter().any(|e| matches!(
+            e,
+            MeshEvent::PublicMessage { text, .. } if text == "spoofed dm"
+        )));
+        assert!(!ev.iter().any(|e| matches!(e, MeshEvent::PrivateMessage { .. })));
     }
 
     #[test]

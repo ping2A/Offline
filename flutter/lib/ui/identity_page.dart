@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:offline/src/rust/api/identity.dart';
 import 'package:offline/ui/app_theme.dart';
+import 'package:offline/version.dart';
 import 'package:offline/ui/binary_qr.dart';
 import 'package:offline/ui/identity_store.dart';
 import 'package:offline/ui/widgets.dart';
@@ -202,6 +203,16 @@ class _IdentityPageState extends State<IdentityPage> {
             }
           },
           child: const Text('Regenerate identity'),
+        ),
+        const SizedBox(height: 22),
+        Text(
+          'Client $kClientVersion · Protocol $kProtocolLabel',
+          textAlign: TextAlign.center,
+          style: GoogleFonts.ibmPlexMono(
+            fontSize: 11,
+            color: OfflineColors.mist,
+            height: 1.4,
+          ),
         ),
       ],
     );

@@ -69,9 +69,12 @@ pub fn decompress_zlib(data: &[u8], original_size: usize) -> Result<Vec<u8>, Pac
     inflate_exact(DeflateDecoder::new(data), original_size)
 }
 
-fn inflate_exact<R: Read>(mut decoder: R, original_size: usize) -> Result<Vec<u8>, PacketError> {
+fn inflate_exact<R: Read>(decoder: R, original_size: usize) -> Result<Vec<u8>, PacketError> {
+    // Cap reads at claimed size + 1 so a lying `original_size` cannot amplify into
+    // gigabytes before the length check (SECURITY_IMPROVEMENTS S-2).
     let mut out = Vec::with_capacity(original_size);
-    decoder
+    let mut limited = decoder.take(original_size as u64 + 1);
+    limited
         .read_to_end(&mut out)
         .map_err(|_| PacketError::Compression)?;
     if out.len() != original_size {
@@ -133,5 +136,14 @@ mod tests {
         let c = compress_zlib(&data).unwrap();
         assert!(!looks_like_zlib(&c), "BitChat wire uses raw DEFLATE, not zlib");
         assert_eq!(decompress_zlib(&c, data.len()).unwrap(), data);
+    }
+
+    #[test]
+    fn decompress_rejects_size_mismatch_without_full_inflate() {
+        let data = vec![7u8; 500];
+        let c = compress_zlib(&data).unwrap();
+        // Claim a tiny original size while the stream expands further — must fail
+        // without buffering the whole inflated stream beyond the claim.
+        assert!(decompress_zlib(&c, 8).is_err());
     }
 }

@@ -2,10 +2,127 @@
 
 Decentralized offline messaging and file transfer for Android, iOS, and Web.
 
-- **Mesh chat** over Bluetooth LE, wire-compatible with [BitChat](https://github.com/permissionlesstech/bitchat) (Noise XX, binary packets, multi-hop relay). No Nostr, Tor, or geohash channels.
+- **Mesh chat** over Bluetooth LE, wire-compatible with [BitChat](https://github.com/permissionlesstech/bitchat) (Noise XX, binary packets, multi-hop relay). No Nostr, Tor, or geohash channels. Official BitChat apps: [iOS](https://apps.apple.com/us/app/bitchat-mesh/id6748219622) · [Android](https://play.google.com/store/apps/details?id=com.bitchat.droid) · [bitchat.free](https://bitchat.free).
 - **Optical file transfer** via fountain-coded animated QR codes (screen → camera), based on [decimen-optical-transfer](https://github.com/bashalarmistalt/decimen-optical-transfer).
 
-Low-level crypto, packet codec, routing policy, and fountain codes are implemented in **Rust**. The mobile UI is **Flutter**.
+Low-level crypto, packet codec, routing policy, and fountain codes are implemented in **Rust**. Clients: **Flutter** (mobile + web) and **`@offline/core`** (WASM / JS).
+
+## How it works
+
+```mermaid
+flowchart TB
+  subgraph clients [Clients]
+    FL[Flutter Android / iOS / Web]
+    JS["@offline/core + offline-web"]
+  end
+
+  subgraph rust [Rust core]
+    CORE[offline-core · MeshController]
+    PKT[offline-packet]
+    NOI[offline-noise]
+    MESH[offline-mesh]
+    FNT[offline-fountain]
+  end
+
+  FL -->|flutter_rust_bridge / WASM| CORE
+  JS -->|wasm-bindgen| CORE
+  CORE --> PKT
+  CORE --> NOI
+  CORE --> MESH
+  CORE --> FNT
+```
+
+Two independent transports share the same identity and packet codec:
+
+| Path | Medium | Role |
+|------|--------|------|
+| **Mesh** | Bluetooth LE (+ browser `BroadcastChannel` for tab↔tab) | Chat, DMs, photos, voice, multi-hop relay |
+| **Optical** | Screen QR → camera | One-shot file transfer (no BLE) |
+
+### Mesh topology
+
+```mermaid
+flowchart LR
+  subgraph phones [BLE mesh]
+    A[Phone A<br/>advertise + scan]
+    B[Phone B<br/>advertise + scan]
+    C[Phone C]
+  end
+
+  subgraph browser [Browser leaf]
+    T1[Tab 1]
+    T2[Tab 2]
+  end
+
+  A <-->|BLE GATT| B
+  B <-->|BLE GATT| C
+  A <-->|BLE GATT| C
+  T1 <-->|BroadcastChannel<br/>offline-mesh-v1| T2
+  T1 -->|Web Bluetooth<br/>central only| A
+  T2 -.->|optional Join phone| B
+```
+
+- **Phones** are full mesh peers (dual-role BLE): they advertise, scan, and relay.
+- **Browsers** cannot advertise. After **Go online**, they talk to other tabs locally; **Connect phone** attaches as a GATT central to a nearby Offline/BitChat peripheral.
+
+### Protocol stack (mesh)
+
+```mermaid
+flowchart TB
+  APP[App · public chat / DM / file / announce]
+  CTRL[MeshController · queue · ingest · drain]
+  ENC[Noise XX session · optional]
+  CODEC[Binary packet v1/v2 · Ed25519 sign · fragments]
+  LINK[BLE notify / write · or BroadcastChannel]
+
+  APP --> CTRL --> ENC --> CODEC --> LINK
+  LINK --> CODEC --> ENC --> CTRL --> APP
+```
+
+Wire format (BitChat-compatible) — details in [`docs/protocol.md`](docs/protocol.md):
+
+```text
+version | type | ttl | timestamp | flags | payload_len
+sender_id (8) | [recipient_id] | [route] | payload | [Ed25519 sig]
+```
+
+Common types: `announce 0x01`, `message 0x02`, `noiseHandshake 0x10`, `noiseEncrypted 0x11`, `fragment 0x20`, `requestSync 0x21`, `fileTransfer 0x22`.
+
+Peer ID = first 8 bytes of `SHA-256(Noise static public)` (16 hex chars).
+
+### Private DM (Noise XX)
+
+```mermaid
+sequenceDiagram
+  participant A as Peer A
+  participant B as Peer B
+
+  A->>B: announce (nick + Noise/sign pubs)
+  B->>A: announce
+  A->>B: noiseHandshake msg1 (XX)
+  B->>A: noiseHandshake msg2
+  A->>B: noiseHandshake msg3
+  Note over A,B: Session ready · static keys bound to peer IDs
+  A->>B: noiseEncrypted (privateMessage TLV)
+  B->>A: noiseEncrypted (delivered receipt)
+```
+
+Optional QR verify: scan BitChat `bitchat://verify?…` → `verifyChallenge` / `verifyResponse` inside Noise.
+
+### Optical transfer
+
+```mermaid
+sequenceDiagram
+  participant S as Sender screen
+  participant R as Receiver camera
+
+  S->>S: LT fountain encode file → frames
+  loop Until complete
+    S->>R: QR frame (decimen header + block)
+    R->>R: ingest · track frames collected
+  end
+  R->>R: decode payload · save file
+```
 
 ## Status
 
@@ -22,9 +139,14 @@ crates/
   offline-mesh/      # TTL flood, dedupe, duty-cycle policy
   offline-fountain/  # LT fountain codes + optical frame header
   offline-core/      # App façade + MeshController
+  offline-wasm/      # wasm-bindgen for JS
   offline_ffi/       # flutter_rust_bridge bindings
 flutter/             # Flutter app (Android / iOS / Web)
-docs/protocol.md     # Compatibility notes
+packages/
+  offline-core-js/   # @offline/core npm package
+  offline-web/       # Vite demo UI (Carbon)
+docs/protocol.md           # Wire format notes
+docs/BITCHAT_ALIGNMENT.md  # Gap list vs bitchat-android (private media, etc.)
 ```
 
 ## Build (Rust)
@@ -87,11 +209,15 @@ Rust runs as WASM under `flutter/web/pkg/` (generated; not committed).
 **Mesh on web:** Start mesh in two browser tabs to chat over `BroadcastChannel`. In Chrome/Edge, **Join BitChat** uses the [Web Bluetooth API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Bluetooth_API) to connect directly to nearby **BitChat** (or Offline) phones — no Offline mobile app required. The browser cannot advertise, so it is a leaf on the phone(s) it joins.
 
 ```bash
-./scripts/run_web.sh              # build + serve http://127.0.0.1:8080/
+./scripts/run_web.sh              # Flutter web: build + serve http://127.0.0.1:8080/
 ./scripts/run_web.sh --rebuild    # force WASM rebuild, then serve :8080
 ./scripts/run_web.sh --dev        # Flutter Chrome hot-reload (random debug port)
-./scripts/build_web.sh            # release artifacts only → flutter/build/web
+./scripts/build_web.sh            # Flutter web release → flutter/build/web
+./scripts/run_js_web.sh           # standalone WASM UI → http://127.0.0.1:5173/
+./scripts/archive_js_web.sh       # zip/tar of static WASM UI → dist/Offline-web-<ver>.*
 ```
+
+Client / protocol versions are defined in [`VERSION`](VERSION) and shown in the Flutter and JS web UIs (`0.1.0 · bitchat-mesh/1`).
 
 Platform IDs: `app.offline.offline`.
 

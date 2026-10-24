@@ -639,6 +639,12 @@ class RustLibWire implements BaseWire {
               that, peer_id, text);
 
   JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
+      wire__crate__api__mesh__MeshSession_queue_read_receipt(
+              int that, String peer_id, String message_id) =>
+          wasmModule.wire__crate__api__mesh__MeshSession_queue_read_receipt(
+              that, peer_id, message_id);
+
+  JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
       wire__crate__api__mesh__MeshSession_queue_public_message(
               int that, String text) =>
           wasmModule.wire__crate__api__mesh__MeshSession_queue_public_message(
@@ -853,6 +859,10 @@ extension type RustLibWasmModule._(JSObject _) implements JSObject {
   external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
       wire__crate__api__mesh__MeshSession_queue_private_message(
           int that, String peer_id, String text);
+
+  external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
+      wire__crate__api__mesh__MeshSession_queue_read_receipt(
+          int that, String peer_id, String message_id);
 
   external JSAny? /* flutter_rust_bridge::for_generated::WireSyncRust2DartDco */
       wire__crate__api__mesh__MeshSession_queue_public_message(

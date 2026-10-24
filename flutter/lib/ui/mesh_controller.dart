@@ -28,6 +28,8 @@ class ChatLine {
     this.fileBytes,
     this.messageId,
     this.deliveryStatus,
+    this.sendProgress,
+    this.readByUs = false,
   });
 
   final String fromPeerId;
@@ -41,8 +43,12 @@ class ChatLine {
   final String? fileName;
   final Uint8List? fileBytes;
   final String? messageId;
-  /// BitChat Noise receipt: `delivered` or `read`.
+  /// BitChat Noise receipt: `sending` → `sent` → `delivered` → `read`.
   String? deliveryStatus;
+  /// 0..1 while BLE fragment train is in flight (BitChat block-reveal).
+  double? sendProgress;
+  /// Inbound: we have opened / acked this private message.
+  bool readByUs;
 
   bool get isImage {
     final m = mimeType?.toLowerCase() ?? '';
@@ -163,7 +169,10 @@ class MeshControllerService extends ChangeNotifier {
   final List<MeshWireFrame> _frames = [];
   List<String> _bleDeviceNames = [];
   String? _selectedPeerId;
+  /// Peer whose DM thread is open in the UI (null = general channel).
+  String? _privateViewPeerId;
   String? _status;
+  bool _connectingNearby = false;
   static const _maxFrames = 200;
 
   AudioRecorder? _recorder;
@@ -176,6 +185,9 @@ class MeshControllerService extends ChangeNotifier {
   /// If the user released before start finished, apply this when start completes.
   bool? _pendingStopSend;
   Future<void> _flushChain = Future<void>.value();
+  final List<ChatLine> _mediaSendQueue = [];
+  final Map<String, Set<String>> _pendingReadReceipts = {};
+  DateTime _lastProgressNotify = DateTime.fromMillisecondsSinceEpoch(0);
 
   AudioRecorder _voiceRecorder() => _recorder ??= AudioRecorder();
 
@@ -190,6 +202,8 @@ class MeshControllerService extends ChangeNotifier {
   bool get canConnectNearby =>
       kIsWeb ? true : _transport.supportsNearbyConnect;
   String? get selectedPeerId => _selectedPeerId;
+  String? get privateViewPeerId => _privateViewPeerId;
+  bool get connectingNearby => _connectingNearby;
   bool get isRecordingVoice => _recording;
   /// True while getUserMedia / encoder startup is in progress (hold already down).
   bool get isVoiceArming => _recordStarting;
@@ -251,7 +265,7 @@ class MeshControllerService extends ChangeNotifier {
     _transport.onBleDevices = (names) {
       _bleDeviceNames = names;
       if (names.isNotEmpty) {
-        _status = 'Joined mesh via ${names.join(', ')}';
+        _status = 'On mesh via ${names.join(', ')}';
       }
       notifyListeners();
     };
@@ -272,7 +286,7 @@ class MeshControllerService extends ChangeNotifier {
     _running = true;
     _bleDeviceNames = _transport.bleDeviceNames;
     _status = kIsWeb
-        ? 'Live — Join BitChat to reach nearby BitChat phones'
+        ? 'Live — connect to the mesh over Bluetooth'
         : 'Mesh live';
     _queueAnnounceAndFlush();
     _announceTimer?.cancel();
@@ -307,6 +321,9 @@ class MeshControllerService extends ChangeNotifier {
     _linkCount = 0;
     _bleDeviceNames = [];
     _selectedPeerId = null;
+    _privateViewPeerId = null;
+    _mediaSendQueue.clear();
+    _pendingReadReceipts.clear();
     _peers.clear();
     _status = 'Mesh stopped';
     notifyListeners();
@@ -314,15 +331,15 @@ class MeshControllerService extends ChangeNotifier {
 
   Future<void> connectNearbyDevice({bool showAllDevices = false}) async {
     if (!_running) {
-      _status = 'Start mesh before joining BitChat';
+      _status = 'Start mesh before connecting over Bluetooth';
       notifyListeners();
       return;
     }
+    _connectingNearby = true;
     _status = showAllDevices
-        ? 'All Bluetooth devices — pick the one advertising BitChat service '
-            'f47b5e2d-… (often unnamed). Skip headphones/keyboards.'
-        : 'Chrome will list devices advertising BitChat’s mesh service '
-            'UUID (f47b5e2d-…). BitChat phones are often unnamed — pick that one.';
+        ? 'Waiting for Bluetooth… pick a mesh peer (often unnamed). '
+            'Skip headphones/keyboards.'
+        : 'Waiting for Bluetooth… choose Offline / BitChat in the system dialog.';
     notifyListeners();
     try {
       await _transport.connectNearbyDevice(showAllDevices: showAllDevices);
@@ -330,8 +347,8 @@ class MeshControllerService extends ChangeNotifier {
       _linkCount = _transport.linkCount();
       _session?.setLinkCount(count: _linkCount);
       _status = _bleDeviceNames.isEmpty
-          ? 'Device connected'
-          : 'Joined via ${_bleDeviceNames.join(', ')}';
+          ? 'Connected to the mesh'
+          : 'On mesh via ${_bleDeviceNames.join(', ')}';
       for (var i = 0; i < 3; i++) {
         _queueAnnounceAndFlush();
       }
@@ -346,7 +363,7 @@ class MeshControllerService extends ChangeNotifier {
       final msg = e.toString();
       if (msg.toLowerCase().contains('abort') ||
           msg.toLowerCase().contains('cancel')) {
-        _status = 'Join cancelled';
+        _status = 'Connect cancelled';
       } else {
         var detail = msg.replaceFirst(RegExp(r'^[^:]+:\s*'), '');
         if (detail.length > 180) {
@@ -355,11 +372,40 @@ class MeshControllerService extends ChangeNotifier {
         _status = detail;
       }
       notifyListeners();
+    } finally {
+      _connectingNearby = false;
+      notifyListeners();
     }
   }
 
   void selectPeer(String? peerId) {
     _selectedPeerId = peerId;
+    notifyListeners();
+  }
+
+  /// Tell the controller which private thread the UI is viewing.
+  void setPrivateView(String? peerId) {
+    _privateViewPeerId = peerId;
+    if (peerId != null) markPeerMessagesRead(peerId);
+  }
+
+  /// Queue Noise read receipts for inbound DMs / private media from [peerId].
+  void markPeerMessagesRead(String peerId) {
+    if (peerId.isEmpty || _session == null) return;
+    final ids = <String>[];
+    final seen = <String>{};
+    for (final m in _messages) {
+      if (m.isLocal ||
+          m.fromPeerId != peerId ||
+          m.messageId == null ||
+          m.messageId!.isEmpty ||
+          !m.isPrivate) {
+        continue;
+      }
+      if (seen.add(m.messageId!)) ids.add(m.messageId!);
+    }
+    if (ids.isEmpty) return;
+    _sendReadReceipts(peerId, ids);
     notifyListeners();
   }
 
@@ -523,7 +569,10 @@ class MeshControllerService extends ChangeNotifier {
       _status = private ? 'Private photo sent' : 'Photo sent on mesh';
       notifyListeners();
     } catch (e) {
-      _status = 'Photo send failed: $e';
+      final msg = e.toString();
+      _status = msg.contains('legacy private media requires consent')
+          ? 'Peer lacks E2E private media — send cancelled'
+          : 'Photo send failed: $e';
       notifyListeners();
     }
   }
@@ -744,7 +793,10 @@ class MeshControllerService extends ChangeNotifier {
       _status = private ? 'Private voice sent' : 'Voice note sent on mesh';
       notifyListeners();
     } catch (e) {
-      _status = 'Voice send failed: $e';
+      final msg = e.toString();
+      _status = msg.contains('legacy private media requires consent')
+          ? 'Peer lacks E2E private media — send cancelled'
+          : 'Voice send failed: $e';
       notifyListeners();
     }
   }
@@ -825,22 +877,66 @@ class MeshControllerService extends ChangeNotifier {
     if (session == null) return;
     final frames = session.drainOutbound();
     if (frames.isEmpty) return;
-    // BitChat assembly window is ~30s; pace at 25ms (closer to BitChat's
-    // bleFragmentSpacingMs) so large voice trains stay intact over BLE.
-    const fragmentPace = Duration(milliseconds: 25);
+    const fragmentPace = Duration(milliseconds: 18);
     var sent = 0;
+    ChatLine? activeMedia;
+    String? activeFragKey;
+
     for (var i = 0; i < frames.length; i++) {
       final frame = frames[i];
-      _logFrame('out', frame.bytes, note: frame.toPeerId ?? 'flood');
+      final bytes = frame.bytes;
+      final frag = _parseFragmentMeta(bytes);
+      final isFragment = frag != null;
+      if (frag != null) {
+        if (frag.idHex != activeFragKey) {
+          activeFragKey = frag.idHex;
+          if (_mediaSendQueue.isNotEmpty) {
+            activeMedia = _mediaSendQueue.removeAt(0);
+          } else {
+            for (final m in _messages) {
+              if (m.isLocal &&
+                  m.fileBytes != null &&
+                  (m.deliveryStatus == 'sending' ||
+                      (m.sendProgress != null && m.sendProgress! < 1))) {
+                activeMedia = m;
+                break;
+              }
+            }
+          }
+          if (activeMedia != null) {
+            _setSendProgress(activeMedia, 0, 'sending');
+          }
+        }
+        if (activeMedia != null) {
+          _setSendProgress(
+            activeMedia,
+            (frag.index + 1) / frag.total,
+            'sending',
+          );
+        }
+      }
+
+      _logFrame('out', bytes, note: frame.toPeerId ?? 'flood');
       try {
-        await _transport.send(frame.bytes);
+        await _transport.send(bytes, reliable: isFragment);
         sent++;
       } catch (e) {
         debugPrint('[Offline] send failed: $e');
       }
-      final isFragment =
-          frame.bytes.length > 1 && frame.bytes[1] == 0x20;
-      if (isFragment && i + 1 < frames.length) {
+
+      if (frag != null &&
+          activeMedia != null &&
+          frag.index + 1 >= frag.total) {
+        _setSendProgress(activeMedia, 1, 'sent');
+        activeMedia = null;
+        activeFragKey = null;
+      } else if (!isFragment &&
+          bytes.length > 1 &&
+          (bytes[1] == 0x11 || bytes[1] == 0x22)) {
+        if (_mediaSendQueue.isNotEmpty) {
+          _setSendProgress(_mediaSendQueue.removeAt(0), 1, 'sent');
+        }
+      } else if (isFragment && i + 1 < frames.length) {
         await Future<void>.delayed(fragmentPace);
       }
     }
@@ -850,6 +946,59 @@ class MeshControllerService extends ChangeNotifier {
         '(${frames.length - sent} failed)',
       );
     }
+  }
+
+  void _setSendProgress(ChatLine m, double progress, String status) {
+    final p = progress.clamp(0.0, 1.0);
+    final changed =
+        m.sendProgress != p || m.deliveryStatus != status;
+    m.sendProgress = p;
+    if (status == 'sending') {
+      m.deliveryStatus = 'sending';
+    } else if (m.deliveryStatus == 'sending' || m.deliveryStatus == null) {
+      m.deliveryStatus = 'sent';
+    }
+    if (!changed) return;
+    final now = DateTime.now();
+    if (status == 'sent' ||
+        now.difference(_lastProgressNotify).inMilliseconds > 80) {
+      _lastProgressNotify = now;
+      notifyListeners();
+    }
+  }
+
+  void _sendReadReceipts(String peerId, List<String> messageIds) {
+    final session = _session;
+    if (session == null || messageIds.isEmpty) return;
+    var queued = 0;
+    for (final id in messageIds) {
+      if (id.isEmpty) continue;
+      try {
+        session.queueReadReceipt(peerId: peerId, messageId: id);
+        queued++;
+        _pendingReadReceipts[peerId]?.remove(id);
+        if (_pendingReadReceipts[peerId]?.isEmpty ?? false) {
+          _pendingReadReceipts.remove(peerId);
+        }
+        for (final m in _messages) {
+          if (!m.isLocal &&
+              m.isPrivate &&
+              m.messageId == id &&
+              m.fromPeerId == peerId) {
+            m.readByUs = true;
+          }
+        }
+      } catch (_) {
+        (_pendingReadReceipts[peerId] ??= <String>{}).add(id);
+      }
+    }
+    if (queued > 0) _scheduleFlushOutbound();
+  }
+
+  void _flushPendingReadReceipts(String peerId) {
+    final set = _pendingReadReceipts[peerId];
+    if (set == null || set.isEmpty) return;
+    _sendReadReceipts(peerId, set.toList());
   }
 
   void _pullEvents() {
@@ -877,27 +1026,36 @@ class MeshControllerService extends ChangeNotifier {
           );
           break;
         case 'dm':
+          final local = ev.peerId == identity.peerId;
+          final mid = ev.detail.isNotEmpty ? ev.detail : null;
           _addMessage(
             ChatLine(
               fromPeerId: ev.peerId,
               text: ev.text,
               timestampMs: ev.timestampMs.toInt(),
-              isLocal: ev.peerId == identity.peerId,
+              isLocal: local,
               isPrivate: true,
               // Local DMs report our own peer id; conversation peer is selected.
-              withPeerId: ev.peerId == identity.peerId
-                  ? _selectedPeerId
-                  : ev.peerId,
-              messageId: ev.detail.isNotEmpty ? ev.detail : null,
+              withPeerId: local ? _selectedPeerId : ev.peerId,
+              messageId: mid,
+              readByUs: local,
             ),
           );
+          if (!local &&
+              mid != null &&
+              _privateViewPeerId == ev.peerId) {
+            _sendReadReceipts(ev.peerId, [mid]);
+          }
           break;
         case 'delivered':
         case 'read':
           final mid = ev.detail;
           if (mid.isNotEmpty) {
             for (final m in _messages) {
-              if (m.isLocal && m.isPrivate && m.messageId == mid) {
+              if (m.isLocal &&
+                  m.isPrivate &&
+                  m.messageId == mid &&
+                  _receiptRank(ev.kind) >= _receiptRank(m.deliveryStatus)) {
                 m.deliveryStatus = ev.kind;
                 break;
               }
@@ -906,23 +1064,38 @@ class MeshControllerService extends ChangeNotifier {
           break;
         case 'file':
           final local = ev.peerId == identity.peerId;
-          _addMessage(
-            ChatLine(
-              fromPeerId: ev.peerId,
-              text: ev.fileName.isNotEmpty ? ev.fileName : ev.text,
-              timestampMs: ev.timestampMs.toInt(),
-              isLocal: local,
-              isPrivate: ev.isPrivate,
-              withPeerId: ev.isPrivate
-                  ? (local ? _selectedPeerId : ev.peerId)
-                  : null,
-              mimeType: ev.detail.isNotEmpty ? ev.detail : null,
-              fileName: ev.fileName.isNotEmpty ? ev.fileName : null,
-              fileBytes: ev.fileBytes.isNotEmpty
-                  ? Uint8List.fromList(ev.fileBytes)
-                  : null,
-            ),
+          // Stable private-media id is mapped into `nickname` (FRB-safe).
+          final mediaId =
+              ev.nickname.isNotEmpty && ev.nickname.startsWith('media-')
+                  ? ev.nickname
+                  : null;
+          final line = ChatLine(
+            fromPeerId: ev.peerId,
+            text: ev.fileName.isNotEmpty ? ev.fileName : ev.text,
+            timestampMs: ev.timestampMs.toInt(),
+            isLocal: local,
+            isPrivate: ev.isPrivate,
+            withPeerId: ev.isPrivate
+                ? (local ? _selectedPeerId : ev.peerId)
+                : null,
+            messageId: mediaId,
+            mimeType: ev.detail.isNotEmpty ? ev.detail : null,
+            fileName: ev.fileName.isNotEmpty ? ev.fileName : null,
+            fileBytes: ev.fileBytes.isNotEmpty
+                ? Uint8List.fromList(ev.fileBytes)
+                : null,
+            deliveryStatus: local ? 'sending' : null,
+            sendProgress: local ? 0 : null,
+            readByUs: local,
           );
+          _addMessage(line);
+          if (local) _mediaSendQueue.add(line);
+          if (!local &&
+              ev.isPrivate &&
+              mediaId != null &&
+              _privateViewPeerId == ev.peerId) {
+            _sendReadReceipts(ev.peerId, [mediaId]);
+          }
           break;
         case 'noise':
           _refreshPeers();
@@ -930,6 +1103,10 @@ class MeshControllerService extends ChangeNotifier {
           final state = parts.isNotEmpty ? parts.first : '';
           if (state == 'ready') {
             _status = 'Secure chat ready · ${ev.peerId.substring(0, 8)}';
+            _flushPendingReadReceipts(ev.peerId);
+            if (_privateViewPeerId == ev.peerId) {
+              markPeerMessagesRead(ev.peerId);
+            }
           } else if (state == 'failed') {
             _status = 'Noise failed: ${ev.detail}';
           } else if (state == 'handshaking') {
@@ -940,6 +1117,10 @@ class MeshControllerService extends ChangeNotifier {
           if (_selectedPeerId == ev.peerId) {
             _selectedPeerId = null;
           }
+          if (_privateViewPeerId == ev.peerId) {
+            _privateViewPeerId = null;
+          }
+          _pendingReadReceipts.remove(ev.peerId);
           _refreshPeers();
           break;
         case 'verified':
@@ -958,6 +1139,15 @@ class MeshControllerService extends ChangeNotifier {
               withPeerId: ev.peerId,
             ),
           );
+          break;
+        case 'private_media_legacy':
+          if (ev.detail == 'needs_consent') {
+            _status =
+                'Peer ${ev.peerId.substring(0, 8)} lacks E2E media — consent required';
+          } else {
+            _status =
+                'Sent without E2E encryption → ${ev.peerId.substring(0, 8)}';
+          }
           break;
       }
     }
@@ -1031,3 +1221,64 @@ class MeshControllerService extends ChangeNotifier {
 }
 
 Uint8List? _compressIsolate(Uint8List raw) => compressMeshJpeg(raw);
+
+int _receiptRank(String? s) {
+  switch (s) {
+    case 'read':
+      return 3;
+    case 'delivered':
+      return 2;
+    case 'sent':
+      return 1;
+    case 'sending':
+      return 0;
+    default:
+      return -1;
+  }
+}
+
+class _FragmentMeta {
+  const _FragmentMeta({
+    required this.idHex,
+    required this.index,
+    required this.total,
+  });
+  final String idHex;
+  final int index;
+  final int total;
+}
+
+_FragmentMeta? _parseFragmentMeta(Uint8List bytes) {
+  if (bytes.length < 14 || bytes[1] != 0x20) return null;
+  final version = bytes[0];
+  if (version != 1 && version != 2) return null;
+  final flags = bytes[11];
+  final hasRecipient = (flags & 0x01) != 0;
+  final isCompressed = (flags & 0x04) != 0;
+  final hasRoute = (flags & 0x08) != 0;
+  var offset = 12;
+  if (version == 2) {
+    if (bytes.length < offset + 4) return null;
+    offset += 4;
+  } else {
+    if (bytes.length < offset + 2) return null;
+    offset += 2;
+  }
+  offset += 8; // sender
+  if (hasRecipient) offset += 8;
+  if (hasRoute) {
+    if (bytes.length < offset + 1) return null;
+    final hops = bytes[offset];
+    offset += 1 + hops * 8;
+  }
+  if (isCompressed) offset += version == 2 ? 4 : 2;
+  if (offset + 13 > bytes.length) return null;
+  final idBuf = StringBuffer();
+  for (var i = 0; i < 8; i++) {
+    idBuf.write(bytes[offset + i].toRadixString(16).padLeft(2, '0'));
+  }
+  final index = (bytes[offset + 8] << 8) | bytes[offset + 9];
+  final total = (bytes[offset + 10] << 8) | bytes[offset + 11];
+  if (total == 0 || index >= total) return null;
+  return _FragmentMeta(idHex: idBuf.toString(), index: index, total: total);
+}

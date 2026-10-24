@@ -39,8 +39,11 @@ class NativeMeshTransport implements MeshTransport {
   }
 
   @override
-  Future<void> send(Uint8List bytes) async {
-    await _methods.invokeMethod('sendPacket', {'bytes': bytes});
+  Future<void> send(Uint8List bytes, {bool reliable = false}) async {
+    await _methods.invokeMethod('sendPacket', {
+      'bytes': bytes,
+      'reliable': reliable,
+    });
   }
 
   @override

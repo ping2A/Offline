@@ -1,5 +1,6 @@
 //! BitChat AnnouncementPacket TLV (1-byte type, 1-byte length).
 
+use crate::capabilities::PeerCapabilities;
 use crate::types::PeerId;
 
 /// TLV tags matching BitChat `AnnouncementPacket`.
@@ -19,6 +20,8 @@ pub struct AnnouncePayload {
     pub noise_public_key: Option<[u8; 32]>,
     pub signing_public_key: Option<[u8; 32]>,
     pub direct_neighbors: Vec<PeerId>,
+    /// Capability bitfield from TLV `0x05` (discovery hint only).
+    pub capabilities: PeerCapabilities,
     /// True when payload used BitChat TLV encoding.
     pub is_tlv: bool,
 }
@@ -29,6 +32,23 @@ pub fn encode_announce_tlv(
     noise_public_key: &[u8; 32],
     signing_public_key: &[u8; 32],
     direct_neighbors: &[PeerId],
+) -> Vec<u8> {
+    encode_announce_tlv_with_caps(
+        nickname,
+        noise_public_key,
+        signing_public_key,
+        direct_neighbors,
+        PeerCapabilities::LOCAL_SUPPORTED,
+    )
+}
+
+/// Encode announce TLV with an explicit capability bitfield.
+pub fn encode_announce_tlv_with_caps(
+    nickname: &str,
+    noise_public_key: &[u8; 32],
+    signing_public_key: &[u8; 32],
+    direct_neighbors: &[PeerId],
+    capabilities: PeerCapabilities,
 ) -> Vec<u8> {
     let nick = nickname.as_bytes();
     let nick_len = nick.len().min(255);
@@ -55,6 +75,13 @@ pub fn encode_announce_tlv(
         out.push(neighbor_bytes.len() as u8);
         out.extend_from_slice(&neighbor_bytes);
     }
+
+    let caps = capabilities.encode();
+    if !caps.is_empty() && caps.len() <= 255 {
+        out.push(announce_tlv::CAPABILITIES);
+        out.push(caps.len() as u8);
+        out.extend_from_slice(&caps);
+    }
     out
 }
 
@@ -70,6 +97,7 @@ pub fn parse_announce_payload(payload: &[u8]) -> AnnouncePayload {
         noise_public_key: None,
         signing_public_key: None,
         direct_neighbors: Vec::new(),
+        capabilities: PeerCapabilities::NONE,
         is_tlv: false,
     }
 }
@@ -83,6 +111,7 @@ fn try_decode_announce_tlv(data: &[u8]) -> Option<AnnouncePayload> {
     let mut noise_public_key: Option<[u8; 32]> = None;
     let mut signing_public_key: Option<[u8; 32]> = None;
     let mut direct_neighbors = Vec::new();
+    let mut capabilities = PeerCapabilities::NONE;
     let mut saw_known = false;
 
     while offset + 2 <= data.len() {
@@ -120,7 +149,12 @@ fn try_decode_announce_tlv(data: &[u8]) -> Option<AnnouncePayload> {
                     direct_neighbors.push(PeerId::from_bytes(id));
                 }
             }
-            announce_tlv::CAPABILITIES | announce_tlv::BRIDGE_GEOHASH => {
+            announce_tlv::CAPABILITIES => {
+                saw_known = true;
+                // Retain low-64 bits even if non-canonical (forward-compat).
+                capabilities = PeerCapabilities::decode(value);
+            }
+            announce_tlv::BRIDGE_GEOHASH => {
                 saw_known = true;
             }
             _ => {}
@@ -139,6 +173,7 @@ fn try_decode_announce_tlv(data: &[u8]) -> Option<AnnouncePayload> {
         noise_public_key,
         signing_public_key,
         direct_neighbors,
+        capabilities,
         is_tlv: true,
     })
 }
@@ -160,6 +195,9 @@ mod tests {
         assert_eq!(parsed.noise_public_key, Some(noise));
         assert_eq!(parsed.signing_public_key, Some(signing));
         assert_eq!(parsed.direct_neighbors.len(), 1);
+        assert!(parsed
+            .capabilities
+            .contains(PeerCapabilities::PRIVATE_MEDIA));
     }
 
     #[test]

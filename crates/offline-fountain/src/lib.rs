@@ -9,6 +9,7 @@ mod soliton;
 
 pub use protocol::{
     fnv1a, pack_frame, parse_frame, FrameHeader, HEADER_LEN, MAGIC0, MAGIC1,
+    MAX_OPTICAL_BLOCK_LEN, MAX_OPTICAL_BYTES, MAX_OPTICAL_K,
 };
 pub use soliton::{LTDecoder, LTEncoder};
 

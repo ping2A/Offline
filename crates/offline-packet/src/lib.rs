@@ -4,17 +4,28 @@
 //! header, big-endian multi-byte fields). See `docs/protocol.md`.
 
 mod announce;
+mod capabilities;
 mod compression;
 mod file_transfer;
 mod fragment;
 mod gcs;
 mod packet_id;
 mod padding;
+mod peer_state;
+mod private_media_id;
 mod private_message;
 mod request_sync;
 mod types;
+mod voice_burst;
 
 pub use announce::{encode_announce_tlv, parse_announce_payload, AnnouncePayload};
+pub use capabilities::PeerCapabilities;
+pub use peer_state::AuthenticatedPeerState;
+pub use private_media_id::{is_stable_private_media_id, private_media_stable_id};
+pub use voice_burst::{
+    VoiceBurstFlags, VoiceBurstPacket, VoiceBurstPayload, VOICE_BURST_MAX_BYTES,
+    VOICE_CODEC_AAC_LC_16KHZ_MONO,
+};
 pub use file_transfer::{
     decode_file_transfer, encode_file_transfer, is_allowed_mime, normalize_mime, sniff_mime,
     FileTransferPayload, MAX_FILE_PAYLOAD_BYTES, MAX_IMAGE_BYTES, MAX_VOICE_NOTE_BYTES,

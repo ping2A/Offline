@@ -1,0 +1,24 @@
+{
+  "name": "@offline/web",
+  "version": "0.1.0",
+  "private": true,
+  "license": "GPL-3.0-or-later",
+  "type": "module",
+  "scripts": {
+    "predev": "npm run build --prefix ../offline-core-js",
+    "dev": "vite",
+    "build": "npm run build --prefix ../offline-core-js && tsc -p tsconfig.json --noEmit && vite build",
+    "preview": "vite preview",
+    "start": "npm run predev && vite --host 127.0.0.1 --port 5173"
+  },
+  "dependencies": {
+    "@offline/core": "file:../offline-core-js",
+    "jsqr": "^1.4.0",
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "@types/qrcode": "^1.5.6",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10"
+  }
+}

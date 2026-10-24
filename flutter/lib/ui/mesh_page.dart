@@ -143,7 +143,7 @@ class _MeshPageState extends State<MeshPage> with SingleTickerProviderStateMixin
           Padding(
             padding: const EdgeInsets.only(top: 2),
             child: Text(
-              'Join BitChat → UUID f47b5e2d-… (often unnamed)',
+              'Tap Mesh to connect over Bluetooth → UUID f47b5e2d-… (often unnamed)',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: GoogleFonts.sourceSans3(
@@ -152,7 +152,33 @@ class _MeshPageState extends State<MeshPage> with SingleTickerProviderStateMixin
               ),
             ),
           ),
-        if (_mesh.status != null)
+        if (_mesh.connectingNearby)
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Row(
+              children: [
+                SizedBox(
+                  width: 12,
+                  height: 12,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 1.6,
+                    color: OfflineColors.moss,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Waiting for Bluetooth… pick a mesh peer in the system dialog.',
+                    style: GoogleFonts.sourceSans3(
+                      fontSize: 11,
+                      color: OfflineColors.ink,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          )
+        else if (_mesh.status != null)
           Padding(
             padding: const EdgeInsets.only(top: 1),
             child: _statusLine(_mesh.status!),
@@ -329,9 +355,11 @@ class _MeshPageState extends State<MeshPage> with SingleTickerProviderStateMixin
                   ? () => _joinBitChat(showAllDevices: true)
                   : null,
               child: Text(
-                _mesh.bleDeviceNames.isEmpty
-                    ? 'Join'
-                    : 'BLE ${_mesh.bleDeviceNames.length}',
+                _mesh.connectingNearby
+                    ? '…'
+                    : _mesh.bleDeviceNames.isEmpty
+                        ? 'Mesh'
+                        : 'BLE ${_mesh.bleDeviceNames.length}',
                 style: GoogleFonts.spaceGrotesk(
                   fontSize: 12,
                   height: 1.0,
@@ -472,21 +500,21 @@ class _MeshPageState extends State<MeshPage> with SingleTickerProviderStateMixin
       builder: (ctx) {
         return AlertDialog(
           title: Text(
-            showAllDevices ? 'Pick BitChat from all devices' : 'Join BitChat',
+            showAllDevices
+                ? 'Connect to the mesh (all devices)'
+                : 'Connect to the mesh',
             style: GoogleFonts.spaceGrotesk(fontWeight: FontWeight.w700),
           ),
           content: Text(
             showAllDevices
-                ? 'Chrome will list every Bluetooth device nearby.\n\n'
-                    'Select the phone advertising BitChat’s mesh service UUID:\n'
-                    'f47b5e2d-4a9e-4c5a-9b3f-8e1d2c3a4b5c\n\n'
-                    'BitChat usually has no device name — skip headphones, '
-                    'keyboards, and other peripherals.'
-                : 'Chrome’s picker is filtered to BitChat / Offline mesh.\n\n'
-                    'Pick the entry advertising service UUID:\n'
-                    'f47b5e2d-4a9e-4c5a-9b3f-8e1d2c3a4b5c\n\n'
-                    'BitChat phones are often unnamed. Keep BitChat open in '
-                    'the foreground. Long-press Join only if the list is empty.',
+                ? 'This desktop’s Bluetooth will list nearby devices.\n\n'
+                    'Pick Offline / BitChat (often unnamed).\n'
+                    'Skip headphones and keyboards.\n\n'
+                    'Linux Chrome: enable chrome://flags/#enable-experimental-web-platform-features then Relaunch.'
+                : 'Link this browser to the mesh over Bluetooth.\n\n'
+                    'Keep BitChat/Offline open nearby.\n'
+                    'On Linux the picker shows all Bluetooth devices (service filters are unreliable).\n\n'
+                    'If the list is empty: chrome://flags/#enable-experimental-web-platform-features → Enabled → Relaunch.',
             style: GoogleFonts.sourceSans3(height: 1.4, fontSize: 15),
           ),
           actions: [
@@ -715,7 +743,7 @@ class _MeshPageState extends State<MeshPage> with SingleTickerProviderStateMixin
                   Padding(
                     padding: const EdgeInsets.only(right: 3),
                     child: _bleAvatar(
-                      name == '(unnamed phone)' ? 'BLE' : name,
+                      name.contains('unnamed') ? 'BLE' : name,
                     ),
                   ),
                 for (final p in inline)
@@ -949,9 +977,11 @@ class _MeshPageState extends State<MeshPage> with SingleTickerProviderStateMixin
     final selected = _mesh.selectedPeerId == p.peerId;
     if (selected && _sendPrivate) {
       _mesh.selectPeer(null);
+      _mesh.setPrivateView(null);
       setState(() => _sendPrivate = false);
     } else {
       _mesh.selectPeer(p.peerId);
+      _mesh.setPrivateView(p.peerId);
       setState(() => _sendPrivate = true);
     }
   }
@@ -1094,6 +1124,7 @@ class _MeshPageState extends State<MeshPage> with SingleTickerProviderStateMixin
                                   onTap: () {
                                     Navigator.of(ctx).pop();
                                     _mesh.selectPeer(p.peerId);
+                                    _mesh.setPrivateView(p.peerId);
                                     setState(() => _sendPrivate = true);
                                   },
                                 );
@@ -1112,6 +1143,16 @@ class _MeshPageState extends State<MeshPage> with SingleTickerProviderStateMixin
   }
 
   Widget _channelToggle() {
+    final peer = _mesh.selectedPeer;
+    var dmLabel = 'DM';
+    if (peer != null) {
+      final n = peer.nickname.trim();
+      if (n.isEmpty) {
+        dmLabel = peer.peerId.substring(0, 8);
+      } else {
+        dmLabel = n.length > 10 ? '${n.substring(0, 9)}…' : n;
+      }
+    }
     return DecoratedBox(
       decoration: BoxDecoration(
         color: OfflineColors.raised,
@@ -1124,18 +1165,19 @@ class _MeshPageState extends State<MeshPage> with SingleTickerProviderStateMixin
           children: [
             Expanded(
               child: _channelTab(
-                label: 'Pub',
+                label: 'General',
                 icon: Icons.public_outlined,
                 selected: !_sendPrivate,
                 privateAccent: false,
                 onTap: () => setState(() {
                   _sendPrivate = false;
+                  _mesh.setPrivateView(null);
                 }),
               ),
             ),
             Expanded(
               child: _channelTab(
-                label: 'DM',
+                label: dmLabel,
                 icon: Icons.lock_rounded,
                 selected: _sendPrivate,
                 privateAccent: true,
@@ -1144,6 +1186,8 @@ class _MeshPageState extends State<MeshPage> with SingleTickerProviderStateMixin
                   if (_mesh.selectedPeerId == null && _mesh.peers.isNotEmpty) {
                     _mesh.selectPeer(_mesh.peers.first.peerId);
                   }
+                  final id = _mesh.selectedPeerId;
+                  if (id != null) _mesh.setPrivateView(id);
                 },
               ),
             ),
@@ -1226,7 +1270,7 @@ class _MeshPageState extends State<MeshPage> with SingleTickerProviderStateMixin
                 child: Text(
                   _mesh.peers.isEmpty
                       ? 'No peers yet — wait for an announce.'
-                      : 'Tap a peer to open a DM.',
+                      : 'Tap a peer for a direct message.',
                   style: GoogleFonts.sourceSans3(
                     fontSize: 11,
                     height: 1.2,
@@ -1333,6 +1377,7 @@ class _MeshPageState extends State<MeshPage> with SingleTickerProviderStateMixin
                 padding: EdgeInsets.zero,
                 onSelected: (id) {
                   _mesh.selectPeer(id);
+                  _mesh.setPrivateView(id);
                   setState(() => _sendPrivate = true);
                 },
                 itemBuilder: (ctx) => [
@@ -1462,8 +1507,10 @@ class _MeshPageState extends State<MeshPage> with SingleTickerProviderStateMixin
       bodyText = m.text;
     }
 
-    final receipt = m.isLocal && m.isPrivate && m.deliveryStatus != null
-        ? ' · ${m.deliveryStatus}'
+    final receipt = m.isLocal && m.deliveryStatus != null
+        ? (m.deliveryStatus == 'sending' && m.sendProgress != null
+            ? ' · ${(m.sendProgress! * 100).round()}%'
+            : ' · ${m.deliveryStatus}')
         : '';
     final textBlock = Text.rich(
       TextSpan(
@@ -1504,19 +1551,19 @@ class _MeshPageState extends State<MeshPage> with SingleTickerProviderStateMixin
       ),
     );
 
+    final sending = m.isLocal &&
+        (m.deliveryStatus == 'sending' ||
+            (m.sendProgress != null && m.sendProgress! < 1));
     final media = hasImage
         ? Padding(
             padding: const EdgeInsets.only(top: 4),
             child: GestureDetector(
-              onTap: () => _showPhoto(m),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(6),
-                child: Image.memory(
-                  m.fileBytes!,
-                  width: 180,
-                  fit: BoxFit.cover,
-                  filterQuality: FilterQuality.medium,
-                ),
+              onTap: sending ? null : () => _showPhoto(m),
+              child: _BlockRevealImage(
+                bytes: m.fileBytes!,
+                width: 180,
+                progress: sending ? (m.sendProgress ?? 0) : 1,
+                sending: sending,
               ),
             ),
           )
@@ -2433,9 +2480,9 @@ class _EmptyChat extends StatelessWidget {
             : (_meshPeersHint()))
         : (kIsWeb
             ? (running
-                ? 'Open another tab, or Join BitChat. Switch to Frames to inspect raw BinaryProtocol bytes.'
-                : 'Start mesh, then Join BitChat. Pick the device with '
-                    'service UUID f47b5e2d-… (often unnamed).')
+                ? 'Open another tab, or tap Mesh to connect over Bluetooth. '
+                    'Switch to Frames to inspect raw BinaryProtocol bytes.'
+                : 'Start mesh, then tap Mesh to connect over this desktop’s Bluetooth.')
             : (running
                 ? 'Nearby peers appear when they announce. Tap one for Noise DMs.'
                 : 'Start the mesh to advertise and chat offline.'));
@@ -3322,4 +3369,113 @@ class _FramePartRow extends StatelessWidget {
       ),
     );
   }
+}
+
+/// BitChat-style left-to-right / top-to-bottom block reveal while sending.
+class _BlockRevealImage extends StatelessWidget {
+  const _BlockRevealImage({
+    required this.bytes,
+    required this.width,
+    required this.progress,
+    required this.sending,
+  });
+
+  final Uint8List bytes;
+  final double width;
+  final double progress;
+  final bool sending;
+
+  @override
+  Widget build(BuildContext context) {
+    final fraction = progress.clamp(0.0, 1.0);
+    final pct = (fraction * 100).round();
+    final reveal = sending ? fraction.clamp(0.02, 1.0) : 1.0;
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(8),
+      child: SizedBox(
+        width: width,
+        child: Stack(
+          alignment: Alignment.bottomRight,
+          children: [
+            ClipPath(
+              clipper: _BlockRevealClipper(fraction: reveal),
+              child: Image.memory(
+                bytes,
+                width: width,
+                fit: BoxFit.cover,
+                filterQuality: FilterQuality.medium,
+              ),
+            ),
+            if (sending)
+              Positioned.fill(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    border: Border.all(
+                      color: OfflineColors.moss.withValues(alpha: 0.35),
+                    ),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+              ),
+            if (sending)
+              Padding(
+                padding: const EdgeInsets.all(6),
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.55),
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: Padding(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                    child: Text(
+                      '$pct%',
+                      style: GoogleFonts.ibmPlexMono(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _BlockRevealClipper extends CustomClipper<Path> {
+  _BlockRevealClipper({required this.fraction, this.columns = 24, this.rows = 16});
+
+  final double fraction;
+  final int columns;
+  final int rows;
+
+  @override
+  Path getClip(Size size) {
+    final path = Path();
+    if (fraction <= 0 || columns <= 0 || rows <= 0) return path;
+    final total = columns * rows;
+    final revealCount =
+        (fraction * total).ceil().clamp(0, total);
+    if (revealCount <= 0) return path;
+    final bw = size.width / columns;
+    final bh = size.height / rows;
+    var left = revealCount;
+    for (var row = 0; row < rows && left > 0; row++) {
+      for (var col = 0; col < columns && left > 0; col++) {
+        path.addRect(Rect.fromLTWH(col * bw, row * bh, bw + 0.5, bh + 0.5));
+        left--;
+      }
+    }
+    return path;
+  }
+
+  @override
+  bool shouldReclip(covariant _BlockRevealClipper oldClipper) =>
+      oldClipper.fraction != fraction ||
+      oldClipper.columns != columns ||
+      oldClipper.rows != rows;
 }
